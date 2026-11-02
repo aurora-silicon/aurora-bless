@@ -170,7 +170,8 @@ impl<'a> crate::Nvram<'a> for Nvram<'a> {
             let new_active = (self.active + 1) % self.partitions.len();
             offset = (new_active * PARTITION_SIZE) as u32;
             if !self.partitions[new_active].empty() {
-                w.erase_if_needed(offset, PARTITION_SIZE);
+                w.erase_if_needed(offset, PARTITION_SIZE)
+                    .map_err(|e| Error::ApplyError(e))?;
             }
             // must only clone 0x7F variables to the next partition
             self.partitions[new_active] = Slot::Valid(
@@ -637,6 +638,7 @@ mod tests {
     struct TestNvram {
         data: Vec<u8>,
         erase_count: usize,
+        fail_erase: bool,
     }
 
     impl TestNvram {
@@ -644,6 +646,7 @@ mod tests {
             Self {
                 data,
                 erase_count: 0,
+                fail_erase: false,
             }
         }
 
@@ -653,11 +656,15 @@ mod tests {
     }
 
     impl NvramWriter for TestNvram {
-        fn erase_if_needed(&mut self, offset: u32, size: usize) {
+        fn erase_if_needed(&mut self, offset: u32, size: usize) -> std::io::Result<()> {
+            if self.fail_erase {
+                return Err(std::io::Error::from_raw_os_error(13));
+            }
             for b in self.data.iter_mut().skip(offset as usize).take(size) {
                 *b = 0xFF;
             }
             self.erase_count += 1;
+            Ok(())
         }
 
         fn write_all(&mut self, offset: u32, buf: &[u8]) -> std::io::Result<()> {
@@ -845,6 +852,38 @@ mod tests {
         );
         assert_eq!(test_var2_entries[1].header.state, VAR_ADDED);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_erase_failure_is_an_error() -> crate::Result<()> {
+        let mut nvr = TestNvram::new(empty_nvram(2));
+        // A used second bank must be erased before the move to it.
+        nvr.data[0x10000..0x10007].copy_from_slice(b"garbage");
+        let data = nvr.get_data().to_owned();
+        let mut nv = Nvram::parse(&data)?;
+        let (sys, common) = (vec![b'.'; 8192], vec![b'.'; 24576]);
+        nv.active_part_mut()
+            .insert_variable(b"v", Cow::Borrowed(&sys), VarType::System);
+        nv.active_part_mut()
+            .insert_variable(b"v", Cow::Borrowed(&common), VarType::Common);
+        nv.apply(&mut nvr)?;
+
+        let before = nvr.get_data().to_owned();
+        let mut nv = Nvram::parse(&before)?;
+        let (sys, common) = (vec![b'.'; 9000], vec![b'.'; 25000]);
+        nv.active_part_mut()
+            .insert_variable(b"v", Cow::Borrowed(&sys), VarType::System);
+        nv.active_part_mut()
+            .insert_variable(b"v", Cow::Borrowed(&common), VarType::Common);
+        nvr.fail_erase = true;
+        match nv.apply(&mut nvr) {
+            Err(Error::ApplyError(e)) => assert_eq!(e.raw_os_error(), Some(13)),
+            Err(e) => panic!("unexpected error {:?}", e),
+            Ok(()) => panic!("apply succeeded although the erase failed"),
+        }
+        // Nothing was written after the failed erase.
+        assert_eq!(nvr.get_data(), &before[..]);
         Ok(())
     }
 

@@ -22,3 +22,14 @@ was qualified on J700 against writable MTD flags `0xc00`. It listed the macOS
 and Omarchy volumes, set the next-only target to the already-selected Omarchy
 volume, reparsed that selection, and produced identical repeated full-NVRAM
 reads with no new QSPIMC timeout.
+
+## Boot NOR write window
+
+The Aurora `spi-apple-qspi` driver starts with the boot NOR read-only
+(`/sys/module/spi_apple_qspi/parameters/read_only` is `Y`). `asahi-bless` and
+`asahi-nvram` writes open a scoped window: they lock the NVRAM device, set
+`read_only` to `N` only if it was `Y`, apply and verify the change, and set it
+back to `Y` on every exit path, including errors. SIGINT, SIGTERM, SIGHUP and
+SIGQUIT are held off while the window is open. Erase failures are returned as
+errors instead of aborting the process. Where the parameter does not exist the
+window only takes the lock.

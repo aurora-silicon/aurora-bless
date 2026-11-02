@@ -5,6 +5,7 @@ use std::{
 };
 
 pub mod mtd;
+pub mod window;
 
 pub mod v1v2;
 pub mod v3;
@@ -73,7 +74,7 @@ pub fn nvram_parse<'a>(nvr: &'a [u8]) -> Result<Box<dyn Nvram<'a> + 'a>> {
 }
 
 pub trait NvramWriter {
-    fn erase_if_needed(&mut self, offset: u32, size: usize);
+    fn erase_if_needed(&mut self, offset: u32, size: usize) -> std::io::Result<()>;
     fn write_all(&mut self, offset: u32, buf: &[u8]) -> std::io::Result<()>;
 }
 

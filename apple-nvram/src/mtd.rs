@@ -9,17 +9,17 @@ impl<T> NvramWriter for T
 where
     T: Seek + Write + AsRawFd,
 {
-    fn erase_if_needed(&mut self, offset: u32, size: usize) {
+    fn erase_if_needed(&mut self, offset: u32, size: usize) -> std::io::Result<()> {
+        // Not an MTD device (a file copy, say): there is nothing to erase.
         if unsafe { mtd_mem_get_info(self.as_raw_fd(), &mut MtdInfoUser::default()) }.is_err() {
-            return;
+            return Ok(());
         }
         let erase_info = EraseInfoUser {
             start: offset,
             length: size as u32,
         };
-        unsafe {
-            mtd_mem_erase(self.as_raw_fd(), &erase_info).unwrap();
-        }
+        unsafe { mtd_mem_erase(self.as_raw_fd(), &erase_info) }?;
+        Ok(())
     }
 
     fn write_all(&mut self, offset: u32, buf: &[u8]) -> std::io::Result<()> {
