@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #![allow(dead_code)]
-use apple_nvram::{nvram_parse, VarType};
+use apple_nvram::{nvram_parse, window::WriteWindow, VarType};
 use gpt::{disk::LogicalBlockSize, GptConfig};
 use std::{
     borrow::Cow,
@@ -347,6 +347,7 @@ pub fn clear_next_boot(device: &str) -> Result<bool> {
         .write(true)
         .open(device)
         .map_err(Error::ApplyError)?;
+    let _window = WriteWindow::open(&file).map_err(Error::ApplyError)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).map_err(Error::ApplyError)?;
     let mut nv = nvram_parse(&data)?;
@@ -382,6 +383,7 @@ pub fn set_boot_volume(device: &str, cand: &BootCandidate, next: bool) -> Result
         .write(true)
         .open(device)
         .map_err(Error::ApplyError)?;
+    let _window = WriteWindow::open(&file).map_err(Error::ApplyError)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).map_err(Error::ApplyError)?;
     let mut nv = nvram_parse(&data)?;

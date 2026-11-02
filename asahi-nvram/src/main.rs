@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 use std::{borrow::Cow, fs::OpenOptions, io::Read, process::ExitCode};
 
-use apple_nvram::{nvram_parse, VarType};
+use apple_nvram::{nvram_parse, window::WriteWindow, VarType};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -63,6 +63,14 @@ fn real_main() -> Result<()> {
         .write(true)
         .open(matches.get_one::<String>("device").unwrap_or(&default_name))
         .unwrap();
+    // Writers hold the NOR open for writing from before the read until the
+    // change is applied; readers never open it.
+    let _window = match matches.subcommand_name() {
+        Some("write") | Some("delete") => {
+            Some(WriteWindow::open(&file).map_err(Error::ApplyError)?)
+        }
+        _ => None,
+    };
     let mut data = Vec::new();
     file.read_to_end(&mut data).unwrap();
     let mut nv = nvram_parse(&data)?;
