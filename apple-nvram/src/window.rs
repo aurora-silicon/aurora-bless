@@ -8,12 +8,13 @@
 //! its own change. SIGINT, SIGTERM, SIGHUP and SIGQUIT are held off while the
 //! window is open, so an interrupted run cannot leave the NOR writable.
 //! Where the parameter does not exist (another NVRAM driver, or no QSPI
-//! driver loaded) the window only takes the lock.
+//! driver loaded), or the device is not a character device (a dry run on a
+//! file copy), the window only takes the lock.
 
 use std::{
     fs::{self, File},
     io,
-    os::unix::io::AsRawFd,
+    os::unix::{fs::FileTypeExt, io::AsRawFd},
     path::{Path, PathBuf},
 };
 
@@ -43,6 +44,10 @@ impl WriteWindow {
         #[allow(deprecated)]
         nix::fcntl::flock(device.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
             .map_err(io::Error::from)?;
+        // A file copy never reaches the NOR, so it needs no opt-in.
+        if !device.metadata()?.file_type().is_char_device() {
+            return Ok(Self { restore: None, old_mask: None });
+        }
 
         let value = match fs::read_to_string(param) {
             Ok(value) => value,
@@ -129,10 +134,21 @@ mod tests {
         }
     }
 
-    fn device(s: &Scratch) -> File {
-        let p = s.path("nvram");
+    /// A character device stands in for the MTD device.
+    fn device(_s: &Scratch) -> File {
+        File::options().read(true).write(true).open("/dev/null").unwrap()
+    }
+
+    #[test]
+    fn a_file_copy_leaves_read_only_alone() {
+        let s = Scratch::new("copy");
+        let param = s.path("read_only");
+        fs::write(&param, "Y\n").unwrap();
+        let p = s.path("nvram.bin");
         fs::write(&p, [0xffu8; 16]).unwrap();
-        File::options().read(true).write(true).open(p).unwrap()
+        let copy = File::options().read(true).write(true).open(p).unwrap();
+        let _w = WriteWindow::open_with(&copy, &param).unwrap();
+        assert_eq!(fs::read_to_string(&param).unwrap(), "Y\n");
     }
 
     #[test]
