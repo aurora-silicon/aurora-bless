@@ -1,0 +1,15 @@
+[package]
+name = "aurora-panel-nits"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shares the built-in panel brightness with the boot loader through NVRAM backlight-nits"
+homepage = "https://github.com/aurora-silicon/aurora-bless"
+repository = "https://github.com/aurora-silicon/aurora-bless"
+
+[dependencies]
+nix = { version = "0.29", features = ["fs", "poll", "signal"] }
+
+[dependencies.apple-nvram]
+path = "../apple-nvram"
+version = "0.4"

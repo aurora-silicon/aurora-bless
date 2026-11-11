@@ -1,0 +1,4 @@
+# The NVRAM brightness service starts once both the built-in panel's backlight
+# and the NVRAM device are there, whichever comes last.
+ACTION=="add", SUBSYSTEM=="backlight", KERNEL=="apple-panel-bl", TAG+="systemd", ENV{SYSTEMD_WANTS}+="aurora-panel-nits.service"
+ACTION=="add", SUBSYSTEM=="mtd", KERNEL!="mtd*ro", ATTR{name}=="nvram", TAG+="systemd", ENV{SYSTEMD_WANTS}+="aurora-panel-nits.service"
