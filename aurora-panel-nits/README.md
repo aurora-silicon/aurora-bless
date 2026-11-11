@@ -3,10 +3,6 @@
 One brightness level for the built-in panel, shared by the boot loader,
 Linux and macOS.
 
-GNOME Shell keeps its own saved level per monitor; desktops need it to
-start built-in panels from the system level instead (the Aurora GNOME Shell
-build does).
-
 The boot loader lights the panel at the level in the NVRAM variable
 `system:backlight-nits` (ASCII hex, 16.16 fixed-point nits: `0x008c0000` is
 140 nits). The `apple-panel-bl` backlight device counts in nits too.
@@ -38,3 +34,8 @@ empty override for the drop-in:
     systemctl mask aurora-panel-nits.service
     mkdir -p '/etc/systemd/system/systemd-backlight@backlight:apple-panel-bl.service.d'
     ln -s /dev/null '/etc/systemd/system/systemd-backlight@backlight:apple-panel-bl.service.d/50-aurora-panel-nits.conf'
+
+GNOME Shell 51 also saves a level per monitor and sets it when the session
+starts. For a built-in panel that level goes stale when the level changes
+elsewhere (macOS, the boot loader, another user's session); a shell that
+starts built-in panels from the system level keeps the shared one.
