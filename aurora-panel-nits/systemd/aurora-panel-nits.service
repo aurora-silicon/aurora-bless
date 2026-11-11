@@ -1,0 +1,12 @@
+[Unit]
+Description=Share the panel brightness with the boot loader (NVRAM backlight-nits)
+Documentation=https://github.com/aurora-silicon/aurora-bless/blob/master/aurora-panel-nits/README.md
+ConditionPathExists=/sys/class/backlight/apple-panel-bl
+ConditionPathExists=/dev/mtd/by-name/nvram
+After=systemd-backlight@backlight:apple-panel-bl.service
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/default/aurora-panel-nits
+ExecStart=/usr/bin/aurora-panel-nits watch
+TimeoutStopSec=15

@@ -5,7 +5,8 @@ members = [
     "asahi-nvram",
     "asahi-btsync",
     "asahi-bless",
-    "asahi-wifisync"
+    "asahi-wifisync",
+    "aurora-panel-nits"
 ]
 resolver = "2"
 
