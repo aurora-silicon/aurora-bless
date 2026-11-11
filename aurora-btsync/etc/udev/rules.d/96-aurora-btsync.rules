@@ -1,0 +1,1 @@
+SUBSYSTEM=="mtd", ATTR{name}=="nvram", DRIVERS=="apple-spi|apple-qspi|spi-apple-qspi", TAG+="systemd", ENV{SYSTEMD_WANTS}+="aurora-btsync.service"

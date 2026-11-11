@@ -6,6 +6,7 @@ use apple_nvram::{nvram_parse, window::WriteWindow, VarType};
 #[derive(Debug)]
 #[allow(dead_code)]
 enum Error {
+    Open(String, std::io::Error),
     Parse,
     SectionTooBig,
     ApplyError(std::io::Error),
@@ -58,21 +59,25 @@ fn real_main() -> Result<()> {
         )
         .get_matches();
     let default_name = "/dev/mtd/by-name/nvram".to_owned();
+    let device = matches.get_one::<String>("device").unwrap_or(&default_name);
+    let writing = matches!(matches.subcommand_name(), Some("write") | Some("delete"));
+    // Reads open the device read-only, so they work while the boot NOR is
+    // read-only and cannot change it.
     let mut file = OpenOptions::new()
         .read(true)
-        .write(true)
-        .open(matches.get_one::<String>("device").unwrap_or(&default_name))
-        .unwrap();
+        .write(writing)
+        .open(device)
+        .map_err(|e| Error::Open(device.clone(), e))?;
     // Writers hold the NOR open for writing from before the read until the
     // change is applied; readers never open it.
-    let _window = match matches.subcommand_name() {
-        Some("write") | Some("delete") => {
-            Some(WriteWindow::open(&file).map_err(Error::ApplyError)?)
-        }
-        _ => None,
+    let _window = if writing {
+        Some(WriteWindow::open(&file).map_err(Error::ApplyError)?)
+    } else {
+        None
     };
     let mut data = Vec::new();
-    file.read_to_end(&mut data).unwrap();
+    file.read_to_end(&mut data)
+        .map_err(|e| Error::Open(device.clone(), e))?;
     let mut nv = nvram_parse(&data)?;
     match matches.subcommand() {
         Some(("read", args)) => {
@@ -136,18 +141,40 @@ fn read_var(val: &str) -> Result<Vec<u8>> {
     let mut i = 0;
     while i < val.len() {
         if val[i] == b'%' {
-            ret.push(
-                u8::from_str_radix(
-                    unsafe { std::str::from_utf8_unchecked(&val[i + 1..i + 3]) },
-                    16,
-                )
-                .map_err(|_| Error::InvalidHex)?,
-            );
-            i += 2;
+            let hex = val.get(i + 1..i + 3).ok_or(Error::InvalidHex)?;
+            let hex = std::str::from_utf8(hex).map_err(|_| Error::InvalidHex)?;
+            ret.push(u8::from_str_radix(hex, 16).map_err(|_| Error::InvalidHex)?);
+            i += 3;
         } else {
-            ret.push(val[i])
+            ret.push(val[i]);
+            i += 1;
         }
-        i += 1;
     }
     Ok(ret)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_var_decodes_percent_escapes() {
+        assert_eq!(read_var("%01").unwrap(), vec![1]);
+        assert_eq!(read_var("ab%2fc").unwrap(), b"ab/c".to_vec());
+        assert_eq!(read_var("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn read_var_rejects_bad_escapes() {
+        for bad in ["%", "%0", "%zz", "a%"] {
+            assert!(matches!(read_var(bad), Err(Error::InvalidHex)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn partitions_by_name() {
+        assert!(matches!(part_by_name("system"), Ok(VarType::System)));
+        assert!(matches!(part_by_name("common"), Ok(VarType::Common)));
+        assert!(matches!(part_by_name("other"), Err(Error::UnknownPartition)));
+    }
 }
