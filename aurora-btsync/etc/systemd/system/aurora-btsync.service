@@ -1,0 +1,18 @@
+[Unit]
+Description=Sync Bluetooth pairings shared with macOS
+Documentation=https://github.com/aurora-silicon/aurora-bless/tree/master/aurora-btsync
+# Write the keys before bluetoothd reads its storage, so a boot needs no
+# bluetoothd restart. When bluetoothd is already running, the sync queues a
+# restart that runs once this unit has finished.
+Before=bluetooth.service
+ConditionPathExists=/dev/mtd/by-name/nvram
+
+[Service]
+Type=oneshot
+Environment=AURORA_BTSYNC_UNIT=1
+ExecStart=/usr/bin/aurora-btsync sync
+StateDirectory=bluetooth aurora-btsync
+StateDirectoryMode=0700
+
+[Install]
+Alias=asahi-btsync.service

@@ -3,7 +3,7 @@
 members = [
     "apple-nvram",
     "aurora-nvram",
-    "asahi-btsync",
+    "aurora-btsync",
     "asahi-bless",
     "asahi-wifisync",
     "aurora-panel-nits"
