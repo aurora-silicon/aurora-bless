@@ -23,8 +23,8 @@ The boot loader lights the panel at the level in the NVRAM variable
 - `restore` sets the stored level, once per boot.
 - `save` stores the current level once.
 
-Writes take the same lock and boot NOR write window as `asahi-bless` and
-`asahi-nvram` (see [NEO.md](../NEO.md)), and skip the write when NVRAM already
+Writes take the same lock and boot NOR write window as `aurora-bless` and
+`aurora-nvram` (see [NEO.md](../NEO.md)), and skip the write when NVRAM already
 holds the level. NVRAM v3 appends each change as a record and erases a 64 KiB
 bank only when the store moves to the next one.
 

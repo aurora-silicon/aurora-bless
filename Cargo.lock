@@ -97,20 +97,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "asahi-nvram"
-version = "0.2.5"
-dependencies = [
- "apple-nvram",
- "clap",
-]
-
-[[package]]
 name = "asahi-wifisync"
 version = "0.2.4"
 dependencies = [
  "apple-nvram",
  "clap",
  "rust-ini",
+]
+
+[[package]]
+name = "aurora-nvram"
+version = "0.2.5-aurora.1"
+dependencies = [
+ "apple-nvram",
+ "clap",
 ]
 
 [[package]]
