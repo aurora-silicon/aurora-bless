@@ -58,29 +58,15 @@ needs them (for an input device, the HID record carries the report
 descriptor). bluetoothd only reads them when it pairs a device itself or
 is asked to connect one. `resolve` lists the BR/EDR devices from NVRAM
 that BlueZ has a pairing for but no records (no `[ServiceRecords]` in
-`/var/lib/bluetooth/<adapter>/cache/<device>`), and calls
-`Device1.Connect` on each: bluetoothd reads and stores the records, then
-connects the device. A device that is off or asleep does not answer; it is
-asked again as soon as it connects by itself (a key press wakes a keyboard,
-which then connects to the last host it used). `resolve` exits when every
-device has its records, so after the first time it exits at once.
+`/var/lib/bluetooth/<adapter>/cache/<device>`), waits for each to connect
+(a key press wakes a keyboard, which then connects to the last host it
+used), and then calls `Device1.Connect` on it: bluetoothd reads and stores
+the records over the device's own link, then connects its profiles.
 
-## Changes from asahi-btsync 0.2.6
-
-The fixes for existing pairings, `[LongTermKey]`, the appearance tag and
-connect timeouts address the problems reported and diagnosed by Ashwin
-Sawant (asahi-nvram issue 48, September 2026), including his suggested fix
-of writing the peripheral key as `[LongTermKey]`.
-
-- Existing BlueZ pairings are refreshed when macOS re-pairs a device
-  instead of being skipped.
-- LE devices get `[LongTermKey]`, and legacy-pairing LTKs with their EDIV
-  and Rand are used; before, devices paired with legacy pairing got no LTK.
-- Tag 0x11 (appearance) is parsed instead of warned about.
-- A failed or timed-out `Device1.Connect` no longer fails the sync; only
-  added or updated devices are connected.
-- bluetoothd is restarted through systemd instead of being sent SIGUSR1,
-  which bluetoothd does not handle (it terminated it).
-- An empty `BluetoothInfo` no longer creates a device `00:00:00:00:00:00`.
-- Malformed records are reported as errors instead of panicking.
-- The BR/EDR `[DeviceID]` group name is spelled correctly.
+It never pages a device that is not connected. When bluetoothd fails to
+read a device's records (for example because the device is off), it still
+marks the device's services as resolved and does not try again until it
+restarts; every later connect then skips the records and fails. So if a
+read fails anyway, `resolve` restarts bluetoothd (at most twice) and waits
+for the device to connect again. It exits when every device has its
+records, so after the first time it exits at once.
