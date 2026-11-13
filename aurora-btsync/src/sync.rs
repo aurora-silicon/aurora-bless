@@ -8,6 +8,15 @@
 //! NVRAM keys last applied, so a pairing made later on Linux is not undone
 //! by older keys still sitting in NVRAM. Devices that are not in NVRAM are
 //! never touched.
+//!
+//! A BR/EDR input device (a keyboard, mouse or trackpad) also gets the HID
+//! service in `Services`, so bluetoothd registers it as an input device
+//! when it loads the file. Without that, bluetoothd treats the device's
+//! first HID connection as one from an unknown device and answers it with
+//! a HID virtual cable unplug, which makes the device drop its pairing with
+//! this controller address, the one macOS uses too. BlueZ still needs the
+//! device's SDP records (the HID record carries the report descriptor);
+//! [`resolve`] has bluetoothd read them from the device.
 
 use std::{
     collections::BTreeMap,
@@ -49,6 +58,14 @@ const LE_KEY_GROUPS: [&str; 4] = [
     "SlaveLongTermKey",
 ];
 
+/// `Services` with the HID service class (Bluetooth Assigned Numbers,
+/// 0x1124), with the trailing separator BlueZ writes.
+const HID_SERVICES: &str = "00001124-0000-1000-8000-00805f9b34fb;";
+
+/// Major device class "Peripheral" (keyboards, pointing devices, game
+/// controllers), bits 8-12 of the class of device.
+const MAJOR_CLASS_PERIPHERAL: u16 = 0x05;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     BrEdr,
@@ -71,6 +88,21 @@ pub trait Device {
     fn render_new(&self) -> KeyFile;
     /// Replaces the key material in an existing `info` file.
     fn apply_keys(&self, kf: &mut KeyFile);
+    /// The `Services` list BlueZ needs before it has the device's SDP
+    /// records, if any.
+    fn services(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// Gives a file with no `Services` the ones the device needs. A list BlueZ
+/// wrote itself (after reading the device's records) is kept.
+fn add_services(dev: &dyn Device, kf: &mut KeyFile) {
+    if let Some(uuids) = dev.services() {
+        if kf.get("General", "Services").is_none() {
+            kf.set("General", "Services", uuids);
+        }
+    }
 }
 
 fn set_ltk(kf: &mut KeyFile, group: &str, key: &Key, auth: u8, ediv: u16, rand: u64) {
@@ -96,6 +128,7 @@ impl Device for BtDevice {
         kf.set("General", "Trusted", "true");
         kf.set("General", "Blocked", "false");
         kf.set("General", "WakeAllowed", "true");
+        add_services(self, &mut kf);
         self.apply_keys(&mut kf);
         kf.set("DeviceID", "Vendor", &self.vendor_id.to_string());
         kf.set("DeviceID", "Product", &self.product_id.to_string());
@@ -105,6 +138,10 @@ impl Device for BtDevice {
         // Type and PINLength describe how the device pairs, which a
         // re-pair does not change, so BlueZ's values are kept.
         kf.set("LinkKey", "Key", &link_key_hex(&self.link_key));
+    }
+    fn services(&self) -> Option<&'static str> {
+        let hid = (self.class >> 8) & 0x1f == MAJOR_CLASS_PERIPHERAL;
+        hid.then_some(HID_SERVICES)
     }
 }
 
@@ -242,7 +279,8 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
 pub enum Outcome {
     /// No `info` file existed; one was written.
     Added,
-    /// macOS changed the keys; the key groups were replaced.
+    /// macOS changed the keys, or the file lacked the services the device
+    /// needs; the file was rewritten.
     Updated,
     /// Nothing to do.
     Unchanged,
@@ -270,10 +308,14 @@ pub fn sync_device(
             Outcome::Added
         }
         Err(e) => return Err(e),
-        Ok(_) if state.entries.get(&state_key) == Some(&fp) => Outcome::Unchanged,
         Ok(text) => {
             let mut kf = KeyFile::parse(&text);
-            dev.apply_keys(&mut kf);
+            // Keys macOS has not changed since the last sync stay as they
+            // are, so a later Linux pairing keeps its keys.
+            if state.entries.get(&state_key) != Some(&fp) {
+                dev.apply_keys(&mut kf);
+            }
+            add_services(dev, &mut kf);
             let new = kf.to_text();
             if new == text {
                 Outcome::Unchanged
@@ -295,6 +337,12 @@ pub trait Bluez {
     /// once the adapter is back; without, only queues the restart.
     fn restart(&self, adapter: &Mac, wait: bool) -> Result<(), String>;
     fn connect(&self, adapter: &Mac, dev: &Mac) -> Result<(), String>;
+    /// Returns once bluetoothd has this adapter and it is powered, or
+    /// after a while if it is not.
+    fn wait_adapter(&self, adapter: &Mac);
+    /// Returns one of `devs` that is connected to the adapter, or blocks
+    /// until one connects (a connection the device or someone else starts).
+    fn wait_connected(&self, adapter: &Mac, devs: &[Mac]) -> Result<Mac, String>;
 }
 
 pub struct Options {
@@ -371,6 +419,73 @@ pub fn sync(
     Ok(report)
 }
 
+/// Whether bluetoothd has the device's SDP records (its cache file has a
+/// `[ServiceRecords]` group, which is what bluetoothd itself checks).
+fn has_records(adapter_dir: &Path, mac: &Mac) -> bool {
+    let cache = adapter_dir.join("cache").join(format_mac(mac));
+    fs::read_to_string(cache).is_ok_and(|t| KeyFile::parse(&t).has_group("ServiceRecords"))
+}
+
+/// The BR/EDR devices from NVRAM that BlueZ has a pairing for but no SDP
+/// records. bluetoothd only reads records when it pairs a device itself or
+/// is asked to connect one, so a pairing copied from macOS has none.
+pub fn unresolved(config: &Path, bt: &BtInfo) -> Vec<Mac> {
+    let adapter_dir = config.join(format_mac(&bt.adapter));
+    bt.devices
+        .iter()
+        .map(|d| d.mac)
+        .filter(|mac| adapter_dir.join(format_mac(mac)).join("info").is_file())
+        .filter(|mac| !has_records(&adapter_dir, mac))
+        .collect()
+}
+
+/// How often resolve restarts bluetoothd after a failed read before it
+/// gives up for this boot.
+const MAX_RESTARTS: usize = 2;
+
+/// Has bluetoothd read the SDP records of the devices that lack them.
+///
+/// `Device1.Connect` on a device whose records bluetoothd does not have
+/// makes it read them first, store them, and then connect the device's
+/// profiles. That is only asked of a device that is connected, so the
+/// records are read over the device's own link: bluetoothd marks a
+/// device's services as resolved after a failed read too (a page to a
+/// device that is off or asleep), and then never reads them again until
+/// it restarts. Devices that are not connected are waited for; a key
+/// press wakes a keyboard, which then connects to the last host it used.
+/// If a read still fails, bluetoothd is restarted so that it reads them
+/// on the next connection. Returns when every device has its records.
+pub fn resolve(config: &Path, bt: &BtInfo, bluez: &dyn Bluez) -> Result<(), String> {
+    if unresolved(config, bt).is_empty() {
+        return Ok(());
+    }
+    bluez.wait_adapter(&bt.adapter);
+    let mut restarts = 0;
+    loop {
+        let pending = unresolved(config, bt);
+        if pending.is_empty() {
+            println!("all devices paired in macOS have their services");
+            return Ok(());
+        }
+        let mac = bluez.wait_connected(&bt.adapter, &pending)?;
+        println!("{}: connected; reading its services", format_mac(&mac));
+        if let Err(e) = bluez.connect(&bt.adapter, &mac) {
+            eprintln!("{}: {e}", format_mac(&mac));
+        }
+        if unresolved(config, bt).contains(&mac) {
+            if restarts == MAX_RESTARTS {
+                return Err(format!(
+                    "{}: bluetoothd could not read its services",
+                    format_mac(&mac)
+                ));
+            }
+            restarts += 1;
+            println!("{}: reading its services failed; restarting bluetoothd", format_mac(&mac));
+            bluez.restart(&bt.adapter, true)?;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +522,13 @@ mod tests {
         running: bool,
         fail_connect: Vec<Mac>,
         log: RefCell<Vec<String>>,
+        /// Where a successful connect stores the device's SDP records, as
+        /// bluetoothd does (the adapter's storage directory).
+        store_records: Option<PathBuf>,
+        /// Devices whose next connect fails (once each).
+        fail_once: RefCell<Vec<Mac>>,
+        /// The devices that connect by themselves, in order.
+        arrivals: RefCell<Vec<Mac>>,
     }
 
     impl Bluez for FakeBluez {
@@ -419,11 +541,38 @@ mod tests {
         }
         fn connect(&self, _: &Mac, dev: &Mac) -> Result<(), String> {
             self.log.borrow_mut().push(format!("connect {}", format_mac(dev)));
-            if self.fail_connect.contains(dev) {
-                Err("org.bluez.Error.Failed: br-connection-page-timeout".into())
-            } else {
-                Ok(())
+            let once = {
+                let mut f = self.fail_once.borrow_mut();
+                let hit = f.contains(dev);
+                f.retain(|d| d != dev);
+                hit
+            };
+            if self.fail_connect.contains(dev) || once {
+                return Err("org.bluez.Error.Failed: br-connection-page-timeout".into());
             }
+            if let Some(dir) = &self.store_records {
+                fs::create_dir_all(dir.join("cache")).unwrap();
+                fs::write(
+                    dir.join("cache").join(format_mac(dev)),
+                    "[General]\nName=x\n\n[ServiceRecords]\n0x00010000=3601\n",
+                )
+                .unwrap();
+            }
+            Ok(())
+        }
+        fn wait_adapter(&self, _: &Mac) {
+            self.log.borrow_mut().push("wait adapter".into());
+        }
+        fn wait_connected(&self, _: &Mac, devs: &[Mac]) -> Result<Mac, String> {
+            let mut arrivals = self.arrivals.borrow_mut();
+            while !arrivals.is_empty() {
+                let dev = arrivals.remove(0);
+                if devs.contains(&dev) {
+                    self.log.borrow_mut().push(format!("arrived {}", format_mac(&dev)));
+                    return Ok(dev);
+                }
+            }
+            Err("bluetoothd went away".into())
         }
     }
 
@@ -434,6 +583,26 @@ mod tests {
 
     fn headphones() -> BtDevice {
         bt_device([0xAC, 0x80, 0x0A, 0x01, 0x02, 0x03], "Headphones", key(0x50))
+    }
+
+    /// Class of device 0x0540: major class peripheral, keyboard.
+    fn bt_keyboard() -> BtDevice {
+        BtDevice {
+            class: 0x0540,
+            ..bt_device([0x20, 0x91, 0x0A, 0x04, 0x05, 0x06], "Keyboard", key(0x60))
+        }
+    }
+
+    /// Class of device 0x0418: major class audio/video, headphones.
+    fn bt_audio() -> BtDevice {
+        BtDevice {
+            class: 0x0418,
+            ..bt_device([0x08, 0xFF, 0x0A, 0x07, 0x08, 0x09], "Speaker", key(0x30))
+        }
+    }
+
+    fn adapter_dir(s: &Scratch) -> PathBuf {
+        s.0.join(format_mac(&ADAPTER))
     }
 
     /// Parses synthetic NVRAM records, as main does with the real ones.
@@ -661,5 +830,180 @@ Services=00001800-0000-1000-8000-00805f9b34fb;00001812-0000-1000-8000-00805f9b34
         };
         sync(&s.0, &bt, &ble, &mut state, &bluez, &opts).unwrap();
         assert_eq!(*bluez.log.borrow(), vec!["restart wait=false".to_string()]);
+    }
+
+    /// bluetoothd answers the first HID connection of a device it has not
+    /// registered as an input device with a virtual cable unplug, and the
+    /// device then drops its pairing (with macOS too, which uses the same
+    /// controller address). So a BR/EDR input device gets the HID service.
+    #[test]
+    fn br_edr_input_devices_get_the_hid_service() {
+        let s = Scratch::new("hid");
+        let (bt, ble) = nvram(&[bt_keyboard(), bt_audio()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let kbd = fs::read_to_string(s.info(&bt_keyboard().mac)).unwrap();
+        assert!(kbd.contains("Services=00001124-0000-1000-8000-00805f9b34fb;\n"), "{kbd}");
+        let audio = fs::read_to_string(s.info(&bt_audio().mac)).unwrap();
+        assert!(!audio.contains("Services="), "{audio}");
+    }
+
+    /// A keyboard synced before the HID service was written: its keys are
+    /// unchanged in NVRAM, but the file still gets the service, and the key
+    /// in the file (here one from a later Linux pairing) is kept.
+    #[test]
+    fn an_earlier_import_gets_the_hid_service() {
+        let s = Scratch::new("hidlate");
+        let kb = bt_keyboard();
+        let (bt, ble) = nvram(&[kb.clone()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let info = s.info(&kb.mac);
+        let old = fs::read_to_string(&info)
+            .unwrap()
+            .replace("Services=00001124-0000-1000-8000-00805f9b34fb;\n", "")
+            .replace(&link_key_hex(&kb.link_key), "99999999999999999999999999999999");
+        fs::write(&info, &old).unwrap();
+
+        let bluez = FakeBluez {
+            running: true,
+            ..Default::default()
+        };
+        let r = run(&s, &bt, &ble, &bluez);
+        assert_eq!(r.changed, vec![(kb.mac, Transport::BrEdr, Outcome::Updated)]);
+        let new = fs::read_to_string(&info).unwrap();
+        assert!(new.contains("Services=00001124-0000-1000-8000-00805f9b34fb;\n"), "{new}");
+        assert!(new.contains("Key=99999999999999999999999999999999\n"), "{new}");
+
+        // And then nothing more to do.
+        let r = run(&s, &bt, &ble, &bluez);
+        assert!(r.changed.is_empty());
+    }
+
+    /// A list of services bluetoothd wrote after reading the records is kept.
+    #[test]
+    fn services_bluez_wrote_are_kept() {
+        let s = Scratch::new("hidkeep");
+        let kb = bt_keyboard();
+        let info = s.info(&kb.mac);
+        fs::create_dir_all(info.parent().unwrap()).unwrap();
+        let services = "Services=00001124-0000-1000-8000-00805f9b34fb;00001200-0000-1000-8000-00805f9b34fb;\n";
+        fs::write(&info, format!("[General]\nName=Keyboard\n{services}\n[LinkKey]\nKey=00\nType=4\n")).unwrap();
+        let (bt, ble) = nvram(&[kb], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let new = fs::read_to_string(&info).unwrap();
+        assert_eq!(new.matches("Services=").count(), 1);
+        assert!(new.contains(services), "{new}");
+    }
+
+    #[test]
+    fn unresolved_lists_known_br_edr_devices_without_records() {
+        let s = Scratch::new("unresolved");
+        let (bt, ble) = nvram(&[bt_keyboard(), bt_audio(), headphones()], &[sc_keyboard()]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        // Not known to BlueZ: nothing to read records for.
+        fs::remove_dir_all(s.info(&headphones().mac).parent().unwrap()).unwrap();
+        // bluetoothd read the speaker's records earlier.
+        let cache = adapter_dir(&s).join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join(format_mac(&bt_audio().mac)), "[ServiceRecords]\n0x00010000=36\n").unwrap();
+        // A cache file with only the name, as bluetoothd writes it when the
+        // device connects, does not count.
+        fs::write(cache.join(format_mac(&bt_keyboard().mac)), "[General]\nName=Keyboard\n").unwrap();
+        assert_eq!(unresolved(&s.0, &bt), vec![bt_keyboard().mac]);
+    }
+
+    #[test]
+    fn resolve_with_nothing_missing_does_nothing() {
+        let s = Scratch::new("resolvenone");
+        let (bt, _) = nvram(&[], &[]);
+        let bluez = FakeBluez::default();
+        resolve(&s.0, &bt, &bluez).unwrap();
+        assert!(bluez.log.borrow().is_empty());
+    }
+
+    /// Nothing is paged: each device's records are read when it connects.
+    #[test]
+    fn resolve_reads_records_when_the_device_connects() {
+        let s = Scratch::new("resolve");
+        let (kb, sp) = (bt_keyboard().mac, bt_audio().mac);
+        let (bt, ble) = nvram(&[bt_keyboard(), bt_audio()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let bluez = FakeBluez {
+            store_records: Some(adapter_dir(&s)),
+            arrivals: RefCell::new(vec![sp, kb]),
+            ..Default::default()
+        };
+        resolve(&s.0, &bt, &bluez).unwrap();
+        assert!(unresolved(&s.0, &bt).is_empty());
+        let (kb, sp) = (format_mac(&kb), format_mac(&sp));
+        assert_eq!(*bluez.log.borrow(), vec![
+            "wait adapter".to_string(),
+            format!("arrived {sp}"),
+            format!("connect {sp}"),
+            format!("arrived {kb}"),
+            format!("connect {kb}"),
+        ]);
+
+        // Every device has its records now: the next boot does nothing.
+        let bluez = FakeBluez::default();
+        resolve(&s.0, &bt, &bluez).unwrap();
+        assert!(bluez.log.borrow().is_empty());
+    }
+
+    /// bluetoothd does not read the records again after a failed read, so
+    /// it is restarted and the device is asked again when it reconnects.
+    #[test]
+    fn a_failed_read_restarts_bluetoothd() {
+        let s = Scratch::new("resolvefail");
+        let kb = bt_keyboard().mac;
+        let (bt, ble) = nvram(&[bt_keyboard()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let bluez = FakeBluez {
+            store_records: Some(adapter_dir(&s)),
+            fail_once: RefCell::new(vec![kb]),
+            arrivals: RefCell::new(vec![kb, kb]),
+            ..Default::default()
+        };
+        resolve(&s.0, &bt, &bluez).unwrap();
+        let k = format_mac(&kb);
+        assert_eq!(*bluez.log.borrow(), vec![
+            "wait adapter".to_string(),
+            format!("arrived {k}"),
+            format!("connect {k}"),
+            "restart wait=true".to_string(),
+            format!("arrived {k}"),
+            format!("connect {k}"),
+        ]);
+    }
+
+    #[test]
+    fn resolve_gives_up_after_repeated_failures() {
+        let s = Scratch::new("resolvegiveup");
+        let kb = bt_keyboard().mac;
+        let (bt, ble) = nvram(&[bt_keyboard()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let bluez = FakeBluez {
+            fail_connect: vec![kb],
+            arrivals: RefCell::new(vec![kb; 5]),
+            ..Default::default()
+        };
+        let e = resolve(&s.0, &bt, &bluez).unwrap_err();
+        assert!(e.contains("could not read its services"), "{e}");
+        let restarts = bluez.log.borrow().iter().filter(|l| l.starts_with("restart")).count();
+        assert_eq!(restarts, MAX_RESTARTS);
+    }
+
+    /// A device that never connects is never paged and keeps resolve
+    /// waiting; it only ends when bluetoothd does (here: the fake has no
+    /// more arrivals).
+    #[test]
+    fn resolve_keeps_waiting_for_a_device_that_stays_off() {
+        let s = Scratch::new("resolveoff");
+        let kb = bt_keyboard().mac;
+        let (bt, ble) = nvram(&[bt_keyboard()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let bluez = FakeBluez::default();
+        assert!(resolve(&s.0, &bt, &bluez).is_err());
+        assert_eq!(*bluez.log.borrow(), vec!["wait adapter".to_string()]);
+        assert_eq!(unresolved(&s.0, &bt), vec![kb]);
     }
 }

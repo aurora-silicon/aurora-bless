@@ -45,6 +45,12 @@ fn real_main() -> Result<(), String> {
                 .arg(clap::arg!(-s --state [STATE] "Where to record the keys last synced.")
                     .default_value("/var/lib/aurora-btsync/devices")),
         )
+        .subcommand(
+            clap::Command::new("resolve")
+                .about("Have bluetoothd read the services of the BR/EDR devices from macOS")
+                .arg(clap::arg!(-c --config [CONFIG] "BlueZ storage directory.")
+                    .default_value(BLUEZ_DIR)),
+        )
         .subcommand(clap::Command::new("dump").about("Dump the raw BR/EDR device record"))
         .get_matches();
 
@@ -86,6 +92,10 @@ fn real_main() -> Result<(), String> {
             };
             sync::sync(config, &bt, &ble, &mut state, &dbus::SystemBus::new(), &opts)?;
             Ok(())
+        }
+        Some(("resolve", args)) => {
+            let config = Path::new(args.get_one::<String>("config").unwrap());
+            sync::resolve(config, &bt, &dbus::SystemBus::new())
         }
         _ => {
             for d in &bt.devices {
