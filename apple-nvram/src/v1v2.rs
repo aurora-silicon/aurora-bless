@@ -68,6 +68,9 @@ impl Debug for CHRPHeader<'_> {
 
 impl CHRPHeader<'_> {
     pub fn parse(nvr: &[u8]) -> Result<CHRPHeader<'_>> {
+        if nvr.len() < 16 {
+            return Err(Error::ParseError);
+        }
         let signature = nvr[0];
         let cksum = nvr[1];
         let size = u16::from_le_bytes(nvr[2..4].try_into().unwrap());
@@ -141,7 +144,7 @@ pub struct Section<'a> {
 
 impl Section<'_> {
     pub fn parse(mut nvr: &[u8]) -> Result<Section<'_>> {
-        let header = CHRPHeader::parse(&nvr[..16])?;
+        let header = CHRPHeader::parse(nvr)?;
         nvr = &nvr[16..];
         let mut values = HashMap::new();
         loop {
@@ -233,16 +236,17 @@ pub struct Partition<'a> {
 
 impl<'a> Partition<'a> {
     pub fn parse(nvr: &[u8]) -> Result<Partition<'_>> {
-        let header = CHRPHeader::parse(&nvr[..16])?;
-        if header.name != b"nvram" {
+        let header = CHRPHeader::parse(nvr)?;
+        if header.name != b"nvram" || nvr.len() < 32 {
             return Err(Error::ParseError);
         }
         let adler = u32::from_le_bytes(nvr[16..20].try_into().unwrap());
         let generation = u32::from_le_bytes(nvr[20..24].try_into().unwrap());
         let sec1 = Section::parse(&nvr[32..])?;
-        let sec2 = Section::parse(&nvr[(32 + sec1.size_bytes())..])?;
-        let calc_adler =
-            adler32::adler32(&nvr[20..(32 + sec1.size_bytes() + sec2.size_bytes())]).unwrap();
+        let sec2_start = 32 + sec1.size_bytes();
+        let sec2 = Section::parse(nvr.get(sec2_start..).ok_or(Error::ParseError)?)?;
+        let end = sec2_start + sec2.size_bytes();
+        let calc_adler = adler32::adler32(nvr.get(20..end).ok_or(Error::ParseError)?).unwrap();
         if adler != calc_adler {
             return Err(Error::ParseError);
         }
@@ -361,7 +365,11 @@ impl<'a> Nvram<'a> {
     pub fn parse(nvr: &[u8]) -> Result<Nvram<'_>> {
         let p1;
         let p2;
-        match (Partition::parse(nvr), Partition::parse(&nvr[0x10000..])) {
+        let second = match nvr.get(0x10000..) {
+            Some(bank) => Partition::parse(bank),
+            None => Err(Error::ParseError),
+        };
+        match (Partition::parse(nvr), second) {
             (Err(err), Err(_)) => return Err(err),
             (Ok(p1r), Err(_)) => {
                 p1 = p1r;
@@ -416,5 +424,87 @@ impl<'a> crate::Nvram<'a> for Nvram<'a> {
             .map_err(|e| Error::ApplyError(e))?;
         w.write_all(0, &data).map_err(|e| Error::ApplyError(e))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header(name: &'static [u8], size_units: u16, out: &mut Vec<u8>) {
+        CHRPHeader {
+            name,
+            size: size_units,
+            signature: 0x70,
+        }
+        .serialize(out);
+    }
+
+    // One CHRP "nvram" partition: 32-byte header, then a "common" and a
+    // "system" section of two 16-byte units each.
+    fn partition(generation: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        header(b"nvram", 6, &mut v);
+        v.extend_from_slice(&[0; 4]);
+        v.extend_from_slice(&generation.to_le_bytes());
+        v.extend_from_slice(&[0; 8]);
+        for (name, var) in [(&b"common"[..], &b"a=b"[..]), (&b"system"[..], &b"c=d"[..])] {
+            let start = v.len();
+            header(name, 2, &mut v);
+            v.extend_from_slice(var);
+            v.resize(start + 32, 0);
+        }
+        let adler = adler32::adler32(&v[20..]).unwrap();
+        v[16..20].copy_from_slice(&adler.to_le_bytes());
+        v
+    }
+
+    fn bank(generation: u32) -> Vec<u8> {
+        let mut v = partition(generation);
+        v.resize(0x10000, 0xFF);
+        v
+    }
+
+    #[test]
+    fn test_short_input_is_an_error() {
+        let full = bank(1);
+        for len in 0..96 {
+            assert!(Partition::parse(&full[..len]).is_err(), "len {len}");
+            assert!(Nvram::parse(&full[..len]).is_err(), "len {len}");
+            assert!(crate::nvram_parse(&full[..len]).is_err(), "len {len}");
+        }
+    }
+
+    #[test]
+    fn test_single_bank_inputs() {
+        // A lone 64 KiB bank: no second v1/v2 bank to read.
+        assert!(Nvram::parse(&bank(1)).is_ok());
+        assert!(Nvram::parse(&vec![0xFF; 0x10000]).is_err());
+        assert!(Nvram::parse(&vec![0; 0x10000]).is_err());
+    }
+
+    #[test]
+    fn test_truncated_second_bank() {
+        let mut data = bank(1);
+        let second = partition(2);
+        for len in 0..second.len() {
+            let mut d = data.clone();
+            d.extend_from_slice(&second[..len]);
+            let nv = Nvram::parse(&d).unwrap();
+            assert_eq!(nv.partitions[nv.active].generation, 1, "len {len}");
+        }
+        data.extend_from_slice(&bank(2));
+        let nv = Nvram::parse(&data).unwrap();
+        assert_eq!(nv.partitions[nv.active].generation, 2);
+    }
+
+    #[test]
+    fn test_section_size_past_end() {
+        let mut p = partition(1);
+        // common claims 0x1000 units: sec2 would start past the input.
+        let mut h = Vec::new();
+        header(b"common", 0x1000, &mut h);
+        p[32..48].copy_from_slice(&h);
+        assert!(Partition::parse(&p).is_err());
     }
 }
