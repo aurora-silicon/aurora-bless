@@ -1,6 +1,6 @@
 # MacBook Neo support
 
-The `neo` branch is the normal read/write `asahi-bless` CLI, based on upstream
+The `neo` branch is the normal read/write `aurora-bless` CLI, based on upstream
 0.4.4. It does not introduce read-only/read-write modes or alternate binaries.
 
 MacBook Neo's J700 NVRAM partition contains 29 banks. Upstream commit

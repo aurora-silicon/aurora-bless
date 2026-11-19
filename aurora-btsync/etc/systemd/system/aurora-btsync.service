@@ -15,4 +15,6 @@ StateDirectory=bluetooth aurora-btsync
 StateDirectoryMode=0700
 
 [Install]
+# LEGACY-ASAHI(2027-02-28): the pre-rename unit name, for units and scripts
+# that still name it.
 Alias=asahi-btsync.service

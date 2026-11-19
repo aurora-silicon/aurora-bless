@@ -4,8 +4,8 @@ members = [
     "apple-nvram",
     "aurora-nvram",
     "aurora-btsync",
-    "asahi-bless",
-    "asahi-wifisync",
+    "aurora-bless",
+    "aurora-wifisync",
     "aurora-panel-nits"
 ]
 resolver = "2"
