@@ -5,6 +5,9 @@ Documentation=https://github.com/aurora-silicon/aurora-bless/tree/master/aurora-
 # bluetoothd restart. When bluetoothd is already running, the sync queues a
 # restart that runs once this unit has finished.
 Before=bluetooth.service
+# BR/EDR devices copied from macOS still need bluetoothd to read their SDP
+# records once it runs.
+Wants=aurora-btsync-resolve.service
 ConditionPathExists=/dev/mtd/by-name/nvram
 
 [Service]

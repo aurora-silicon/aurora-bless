@@ -7,12 +7,15 @@ them into BlueZ's storage under `/var/lib/bluetooth`. It replaces
 `asahi-btsync`, which stays available as a symlink, and
 `asahi-btsync.service` is an alias of `aurora-btsync.service`.
 
-    aurora-btsync list   # the devices paired in macOS (no keys printed)
-    aurora-btsync sync   # needs root
+    aurora-btsync list     # the devices paired in macOS (no keys printed)
+    aurora-btsync sync     # needs root
+    aurora-btsync resolve  # needs root and a running bluetoothd
 
 The udev rule starts `aurora-btsync.service` when the NVRAM device appears.
 The unit runs before `bluetooth.service`, so at boot bluetoothd reads the
-keys when it starts and needs no restart.
+keys when it starts and needs no restart. It also starts
+`aurora-btsync-resolve.service`, which runs `aurora-btsync resolve` once
+bluetoothd is up.
 
 ## What sync does
 
@@ -33,6 +36,13 @@ keys when it starts and needs no restart.
   key (tag 0x10), which is also written as `PeripheralLongTermKey`.
 - Tag 0x11 is the device's appearance and goes into `[General]` of a new
   file.
+- A BR/EDR device of major class Peripheral (keyboard, mouse, trackpad,
+  game controller) gets the HID service in `Services` if its file has no
+  `Services`, including files written by older versions. bluetoothd only
+  registers a device as an input device when it lists that service. It
+  answers a HID connection from a device it has not registered with a
+  virtual cable unplug, and the device then deletes its pairing for this
+  controller address, which is the one macOS uses too.
 - When bluetoothd is already running and the storage directory is its own
   (`/var/lib/bluetooth`, not one given with `-c`), it is restarted so it loads the new
   keys, and only the devices that were added or updated are connected. A
@@ -41,22 +51,22 @@ keys when it starts and needs no restart.
 
 Files are written atomically with mode 0600.
 
-## Changes from asahi-btsync 0.2.6
+## What resolve does
 
-The fixes for existing pairings, `[LongTermKey]`, the appearance tag and
-connect timeouts address the problems reported and diagnosed by Ashwin
-Sawant (asahi-nvram issue 48, September 2026), including his suggested fix
-of writing the peripheral key as `[LongTermKey]`.
+NVRAM holds a BR/EDR device's link key but not its SDP records, and BlueZ
+needs them (for an input device, the HID record carries the report
+descriptor). bluetoothd only reads them when it pairs a device itself or
+is asked to connect one. `resolve` lists the BR/EDR devices from NVRAM
+that BlueZ has a pairing for but no records (no `[ServiceRecords]` in
+`/var/lib/bluetooth/<adapter>/cache/<device>`), waits for each to connect
+(a key press wakes a keyboard, which then connects to the last host it
+used), and then calls `Device1.Connect` on it: bluetoothd reads and stores
+the records over the device's own link, then connects its profiles.
 
-- Existing BlueZ pairings are refreshed when macOS re-pairs a device
-  instead of being skipped.
-- LE devices get `[LongTermKey]`, and legacy-pairing LTKs with their EDIV
-  and Rand are used; before, devices paired with legacy pairing got no LTK.
-- Tag 0x11 (appearance) is parsed instead of warned about.
-- A failed or timed-out `Device1.Connect` no longer fails the sync; only
-  added or updated devices are connected.
-- bluetoothd is restarted through systemd instead of being sent SIGUSR1,
-  which bluetoothd does not handle (it terminated it).
-- An empty `BluetoothInfo` no longer creates a device `00:00:00:00:00:00`.
-- Malformed records are reported as errors instead of panicking.
-- The BR/EDR `[DeviceID]` group name is spelled correctly.
+It never pages a device that is not connected. When bluetoothd fails to
+read a device's records (for example because the device is off), it still
+marks the device's services as resolved and does not try again until it
+restarts; every later connect then skips the records and fails. So if a
+read fails anyway, `resolve` restarts bluetoothd (at most twice) and waits
+for the device to connect again. It exits when every device has its
+records, so after the first time it exits at once.
