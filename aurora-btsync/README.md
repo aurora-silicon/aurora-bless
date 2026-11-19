@@ -4,8 +4,8 @@ Lets Linux use Bluetooth devices that were paired in macOS, without pairing
 them again. macOS keeps its pairings in NVRAM (`BluetoothUHEDevices` for
 BR/EDR devices, `BluetoothInfo` for LE devices); `aurora-btsync sync` writes
 them into BlueZ's storage under `/var/lib/bluetooth`. It replaces
-`asahi-btsync`, which stays available as a symlink, and
-`asahi-btsync.service` is an alias of `aurora-btsync.service`.
+the upstream btsync tool. Until 2027-02-28 the pre-rename service name is
+kept as an alias of `aurora-btsync.service`.
 
     aurora-btsync list   # the devices paired in macOS (no keys printed)
     aurora-btsync sync   # needs root
