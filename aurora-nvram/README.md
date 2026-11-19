@@ -1,8 +1,8 @@
 # aurora-nvram
 
 Reads, writes and deletes NVRAM variables on Apple silicon Macs. It replaces
-`asahi-nvram`, which is installed as a symlink to it so existing scripts keep
-working.
+the upstream nvram tool; distribution packages keep the pre-rename command
+name as a symlink until 2027-02-28 so existing scripts keep working.
 
     aurora-nvram read                          # every variable
     aurora-nvram read system:StartupMute       # one variable

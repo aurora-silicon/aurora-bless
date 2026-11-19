@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #![allow(dead_code)]
-use asahi_bless::{get_boot_candidates, get_boot_volume, set_boot_volume, clear_next_boot,  BootCandidate, Error, Volume};
+use aurora_bless::{get_boot_candidates, get_boot_volume, set_boot_volume, clear_next_boot,  BootCandidate, Error, Volume};
 use clap::Parser;
 use std::{
     io::{stdin, stdout, Write},
@@ -9,7 +9,7 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
-compile_error!("asahi-bless will only work on linux, if you are on macos, use system `bless` instead");
+compile_error!("aurora-bless will only work on linux, if you are on macos, use system `bless` instead");
 
 type Result<T> = std::result::Result<T, Error>;
 
