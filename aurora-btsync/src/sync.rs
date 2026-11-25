@@ -410,7 +410,14 @@ pub fn sync(
     bluez.restart(&bt.adapter, true)?;
     // Only the devices whose keys changed are connected. A device that is
     // off or out of range just times out; that is not a sync failure.
-    for (mac, _, _) in &report.changed {
+    // A BR/EDR device without its SDP records is left to `resolve`: paging
+    // it while it is asleep fails the record read, bluetoothd still marks
+    // its services as resolved, and the device then cannot connect until
+    // bluetoothd restarts.
+    let waiting = unresolved(config, bt);
+    for (mac, _, _) in report.changed.iter().filter(|(m, t, _)| {
+        !(*t == Transport::BrEdr && waiting.contains(m))
+    }) {
         if let Err(e) = bluez.connect(&bt.adapter, mac) {
             eprintln!("{}: connect failed: {e}", format_mac(mac));
             report.connect_failures += 1;
@@ -658,7 +665,8 @@ mod tests {
 
         let log = bluez.log.borrow();
         assert_eq!(log[0], "restart wait=true");
-        assert_eq!(log.len(), 4);
+        // The two LE devices; the headphones wait for resolve (no records).
+        assert_eq!(log.len(), 3);
     }
 
     #[test]
@@ -773,6 +781,11 @@ Services=00001800-0000-1000-8000-00805f9b34fb;00001812-0000-1000-8000-00805f9b34
     fn connect_timeouts_are_logged_and_ignored() {
         let s = Scratch::new("timeout");
         let hp = headphones();
+        // bluetoothd already has the headphones' records (they were used
+        // on Linux before), so the sync connects them.
+        let cache = s.info(&hp.mac).parent().unwrap().parent().unwrap().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join(format_mac(&hp.mac)), "[ServiceRecords]\n0x00010000=3601\n").unwrap();
         let (bt, ble) = nvram(&[hp.clone()], &[legacy_mouse()]);
         let bluez = FakeBluez {
             running: true,
@@ -785,6 +798,21 @@ Services=00001800-0000-1000-8000-00805f9b34fb;00001812-0000-1000-8000-00805f9b34
         // The mouse after the failing headphones is still connected.
         assert_eq!(bluez.log.borrow().last().unwrap(), &format!("connect {}", format_mac(&legacy_mouse().mac)));
         assert!(s.info(&legacy_mouse().mac).exists());
+    }
+
+    /// A BR/EDR device with no SDP records is not paged after a sync: a
+    /// failed page would leave bluetoothd unable to read them until it
+    /// restarts. `resolve` reads them once the device connects.
+    #[test]
+    fn devices_without_records_are_not_paged() {
+        let s = Scratch::new("nopage");
+        let (bt, ble) = nvram(&[headphones()], &[legacy_mouse()]);
+        let bluez = FakeBluez { running: true, ..Default::default() };
+        let r = run(&s, &bt, &ble, &bluez);
+        assert_eq!(r.changed.len(), 2);
+        let log = bluez.log.borrow();
+        assert!(!log.contains(&format!("connect {}", format_mac(&headphones().mac))));
+        assert!(log.contains(&format!("connect {}", format_mac(&legacy_mouse().mac))));
     }
 
     #[test]
