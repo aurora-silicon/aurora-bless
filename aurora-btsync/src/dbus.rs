@@ -27,6 +27,26 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RESTART_TIMEOUT: Duration = Duration::from_secs(20);
 const ADAPTER_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The BR/EDR bearer of a device (BlueZ 5.84 and later).
+const BREDR_BEARER: &str = "org.bluez.Bearer.BREDR1";
+
+/// Whether the device's BR/EDR link is up. SDP runs over BR/EDR, and
+/// `Device1.Connect` on a dual-mode device whose LE link is up pages it over
+/// BR/EDR, so an LE connection must not count. BlueZ before the bearer
+/// interfaces only has `Device1.Connected`.
+fn bredr_connected(con: &Connection, path: &str) -> bool {
+    let proxy = con.with_proxy("org.bluez", path, Duration::from_secs(5));
+    match proxy.get::<bool>(BREDR_BEARER, "Connected") {
+        Ok(c) => c,
+        Err(e) if e.name() == Some("org.freedesktop.DBus.Error.InvalidArgs")
+            || e.name() == Some("org.freedesktop.DBus.Error.UnknownInterface") =>
+        {
+            matches!(proxy.get::<bool>("org.bluez.Device1", "Connected"), Ok(true))
+        }
+        Err(_) => false,
+    }
+}
+
 /// The last element of a device's object path.
 fn dev_node(dev: &Mac) -> String {
     format!("dev_{}", format_mac(dev).replace(':', "_"))
@@ -195,7 +215,10 @@ impl Bluez for SystemBus {
             .add_match(
                 rule,
                 move |p: PropertiesPropertiesChanged, _: &Connection, msg: &Message| {
-                    let connected = p.interface_name == "org.bluez.Device1"
+                    // Device1.Connected is true for either bearer; which one
+                    // is checked below.
+                    let connected = (p.interface_name == "org.bluez.Device1"
+                        || p.interface_name == BREDR_BEARER)
                         && prop_cast::<bool>(&p.changed_properties, "Connected") == Some(&true);
                     if let (true, Some(path)) = (connected, msg.path()) {
                         sink.lock().unwrap().push(path.to_string());
@@ -208,12 +231,7 @@ impl Bluez for SystemBus {
         // connection in between is not missed).
         if let Ok(Some(a)) = self.adapter_path(adapter) {
             for dev in devs {
-                let proxy = con.with_proxy(
-                    "org.bluez",
-                    format!("{}/{}", a, dev_node(dev)),
-                    Duration::from_secs(5),
-                );
-                if matches!(proxy.get::<bool>("org.bluez.Device1", "Connected"), Ok(true)) {
+                if bredr_connected(con, &format!("{}/{}", a, dev_node(dev))) {
                     let _ = con.remove_match(token);
                     return Ok(*dev);
                 }
@@ -224,9 +242,10 @@ impl Bluez for SystemBus {
             if !paths.is_empty() {
                 // The adapter's path can change when bluetoothd restarts.
                 if let Ok(Some(a)) = self.adapter_path(adapter) {
-                    let hit = devs
-                        .iter()
-                        .find(|d| paths.contains(&format!("{}/{}", a, dev_node(d))));
+                    let hit = devs.iter().find(|d| {
+                        let path = format!("{}/{}", a, dev_node(d));
+                        paths.contains(&path) && bredr_connected(con, &path)
+                    });
                     if let Some(dev) = hit {
                         break Ok(*dev);
                     }
