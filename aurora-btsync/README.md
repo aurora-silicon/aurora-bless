@@ -10,12 +10,15 @@ them into BlueZ's storage under `/var/lib/bluetooth`. It replaces
     aurora-btsync list     # the devices paired in macOS (no keys printed)
     aurora-btsync sync     # needs root
     aurora-btsync resolve  # needs root and a running bluetoothd
+    aurora-btsync connect  # needs root and a running bluetoothd
 
 The udev rule starts `aurora-btsync.service` when the NVRAM device appears.
 The unit runs before `bluetooth.service`, so at boot bluetoothd reads the
 keys when it starts and needs no restart. It also starts
 `aurora-btsync-resolve.service`, which runs `aurora-btsync resolve` once
-bluetoothd is up.
+bluetoothd is up, and `aurora-btsync-connect.service`, which runs
+`aurora-btsync connect`. The packages also link that unit into
+`suspend.target.wants`, so it runs again after every resume.
 
 ## What sync does
 
@@ -70,3 +73,18 @@ restarts; every later connect then skips the records and fails. So if a
 read fails anyway, `resolve` restarts bluetoothd (at most twice) and waits
 for the device to connect again. It exits when every device has its
 records, so after the first time it exits at once.
+
+## What connect does
+
+macOS connects its keyboard and trackpad when it starts, so they work at
+the login screen. BlueZ does not: it only reconnects a HID device after the
+link drops, and only when the device's HID record says it accepts that.
+`connect` asks bluetoothd to connect each BR/EDR device from NVRAM that it
+knows as an input device (its `info` lists the HID service and its SDP
+records are cached), in rounds for about a minute (pauses of 2, 4, 8, 15,
+15 and 15 seconds), until the device is connected, by `connect` or by
+itself. A device that is off, asleep or connected to another host does not
+answer the page; that is not an error, and the device connects by itself
+when it wakes. A device without its records is never paged (that is
+`resolve`'s job, see above). LE input devices need nothing: bluetoothd
+reconnects those itself.
