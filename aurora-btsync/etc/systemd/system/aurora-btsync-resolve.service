@@ -1,0 +1,13 @@
+[Unit]
+Description=Read the services of Bluetooth devices paired in macOS
+Documentation=https://github.com/aurora-silicon/aurora-bless/tree/master/aurora-btsync
+# bluetoothd has no SDP records for a BR/EDR device whose pairing was copied
+# from macOS, so it cannot use a keyboard or mouse until it reads them. This
+# asks bluetoothd to read them, now if the device answers, otherwise the
+# next time the device connects. It exits once every device has them.
+After=aurora-btsync.service bluetooth.service
+ConditionPathExists=/dev/mtd/by-name/nvram
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/aurora-btsync resolve

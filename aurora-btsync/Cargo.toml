@@ -1,7 +1,7 @@
 [package]
 name = "aurora-btsync"
 license = "MIT"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Sync Bluetooth pairing keys shared with macOS from NVRAM on Apple silicon Macs"
 homepage = "https://github.com/aurora-silicon/aurora-bless"
