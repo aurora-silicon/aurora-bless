@@ -51,6 +51,12 @@ fn real_main() -> Result<(), String> {
                 .arg(clap::arg!(-c --config [CONFIG] "BlueZ storage directory.")
                     .default_value(BLUEZ_DIR)),
         )
+        .subcommand(
+            clap::Command::new("connect")
+                .about("Connect the keyboards, mice and trackpads paired in macOS")
+                .arg(clap::arg!(-c --config [CONFIG] "BlueZ storage directory.")
+                    .default_value(BLUEZ_DIR)),
+        )
         .subcommand(clap::Command::new("dump").about("Dump the raw BR/EDR device record"))
         .get_matches();
 
@@ -96,6 +102,10 @@ fn real_main() -> Result<(), String> {
         Some(("resolve", args)) => {
             let config = Path::new(args.get_one::<String>("config").unwrap());
             sync::resolve(config, &bt, &dbus::SystemBus::new())
+        }
+        Some(("connect", args)) => {
+            let config = Path::new(args.get_one::<String>("config").unwrap());
+            sync::connect(config, &bt, &dbus::SystemBus::new())
         }
         _ => {
             for d in &bt.devices {

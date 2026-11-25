@@ -1,0 +1,16 @@
+[Unit]
+Description=Connect the Bluetooth keyboards and mice paired in macOS
+Documentation=https://github.com/aurora-silicon/aurora-bless/tree/master/aurora-btsync
+# macOS connects its keyboard and trackpad when it starts; BlueZ only
+# reconnects a HID device after it loses the link. This pages each input
+# device paired in macOS (once bluetoothd has its SDP records) for about a
+# minute, so it works at the login screen without a key press first. A
+# device that is off does not answer and connects by itself when it wakes.
+# aurora-btsync.service pulls this in at boot; packages also link it into
+# suspend.target.wants, which is reached again on wake-up.
+After=aurora-btsync.service bluetooth.service suspend.target
+ConditionPathExists=/dev/mtd/by-name/nvram
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/aurora-btsync connect

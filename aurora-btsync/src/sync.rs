@@ -24,6 +24,7 @@ use std::{
     io::{self, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use crate::keyfile::{escape, KeyFile};
@@ -61,6 +62,9 @@ const LE_KEY_GROUPS: [&str; 4] = [
 /// `Services` with the HID service class (Bluetooth Assigned Numbers,
 /// 0x1124), with the trailing separator BlueZ writes.
 const HID_SERVICES: &str = "00001124-0000-1000-8000-00805f9b34fb;";
+
+/// The HID service class UUID, as BlueZ lists it in `Services`.
+const HID_UUID: &str = "00001124-0000-1000-8000-00805f9b34fb";
 
 /// Major device class "Peripheral" (keyboards, pointing devices, game
 /// controllers), bits 8-12 of the class of device.
@@ -343,6 +347,10 @@ pub trait Bluez {
     /// Returns one of `devs` that is connected to the adapter, or blocks
     /// until one connects (a connection the device or someone else starts).
     fn wait_connected(&self, adapter: &Mac, devs: &[Mac]) -> Result<Mac, String>;
+    /// Whether the device's BR/EDR link to the adapter is up.
+    fn connected(&self, adapter: &Mac, dev: &Mac) -> bool;
+    /// Waits between connection attempts.
+    fn pause(&self, d: Duration);
 }
 
 pub struct Options {
@@ -493,6 +501,68 @@ pub fn resolve(config: &Path, bt: &BtInfo, bluez: &dyn Bluez) -> Result<(), Stri
     }
 }
 
+/// The BR/EDR devices from NVRAM that bluetoothd knows as input devices:
+/// their `info` lists the HID service and bluetoothd has their SDP records.
+/// Connecting one of these is safe; a device without its records is left to
+/// `resolve` (see `sync`).
+pub fn hid_ready(config: &Path, bt: &BtInfo) -> Vec<Mac> {
+    let adapter_dir = config.join(format_mac(&bt.adapter));
+    bt.devices
+        .iter()
+        .map(|d| d.mac)
+        .filter(|mac| {
+            let info = adapter_dir.join(format_mac(mac)).join("info");
+            fs::read_to_string(info).is_ok_and(|t| {
+                KeyFile::parse(&t)
+                    .get("General", "Services")
+                    .is_some_and(|s| s.split(';').any(|u| u.eq_ignore_ascii_case(HID_UUID)))
+            })
+        })
+        .filter(|mac| has_records(&adapter_dir, mac))
+        .collect()
+}
+
+/// Pauses (seconds) between the rounds of `connect`: about a minute in all.
+const CONNECT_PAUSES: [u64; 6] = [2, 4, 8, 15, 15, 15];
+
+/// Connects the keyboards, mice and trackpads paired in macOS, as macOS does
+/// when it starts, so they work at the login screen without a key press
+/// first. BlueZ does not do this itself: it only reconnects a HID device
+/// after it loses the link, and only one whose records allow it.
+///
+/// Each device that is not connected yet is asked to connect, in rounds
+/// for about a minute, until it is connected (by us or by itself). A device
+/// that is off, asleep or with another host does not answer the page; that
+/// is not an error, it connects by itself when it wakes.
+pub fn connect(config: &Path, bt: &BtInfo, bluez: &dyn Bluez) -> Result<(), String> {
+    let mut pending = hid_ready(config, bt);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    bluez.wait_adapter(&bt.adapter);
+    for pause in std::iter::once(0).chain(CONNECT_PAUSES) {
+        if pause > 0 {
+            bluez.pause(Duration::from_secs(pause));
+        }
+        pending.retain(|mac| !bluez.connected(&bt.adapter, mac));
+        for mac in &pending {
+            match bluez.connect(&bt.adapter, mac) {
+                Ok(()) => println!("{}: connected", format_mac(mac)),
+                Err(e) => println!("{}: no answer yet ({e})", format_mac(mac)),
+            }
+        }
+        pending.retain(|mac| !bluez.connected(&bt.adapter, mac));
+        if pending.is_empty() {
+            println!("every input device paired in macOS is connected");
+            return Ok(());
+        }
+    }
+    for mac in &pending {
+        println!("{}: did not answer; it connects when it wakes", format_mac(mac));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +606,10 @@ mod tests {
         fail_once: RefCell<Vec<Mac>>,
         /// The devices that connect by themselves, in order.
         arrivals: RefCell<Vec<Mac>>,
+        /// Devices whose BR/EDR link is up.
+        links: RefCell<Vec<Mac>>,
+        /// Devices that connect by themselves at the next pause.
+        wake: RefCell<Vec<Mac>>,
     }
 
     impl Bluez for FakeBluez {
@@ -565,7 +639,16 @@ mod tests {
                 )
                 .unwrap();
             }
+            self.links.borrow_mut().push(*dev);
             Ok(())
+        }
+        fn connected(&self, _: &Mac, dev: &Mac) -> bool {
+            self.links.borrow().contains(dev)
+        }
+        fn pause(&self, d: Duration) {
+            self.log.borrow_mut().push(format!("pause {}", d.as_secs()));
+            let woke: Vec<Mac> = self.wake.borrow_mut().drain(..).collect();
+            self.links.borrow_mut().extend(woke);
         }
         fn wait_adapter(&self, _: &Mac) {
             self.log.borrow_mut().push("wait adapter".into());
@@ -1033,5 +1116,93 @@ Services=00001800-0000-1000-8000-00805f9b34fb;00001812-0000-1000-8000-00805f9b34
         assert!(resolve(&s.0, &bt, &bluez).is_err());
         assert_eq!(*bluez.log.borrow(), vec!["wait adapter".to_string()]);
         assert_eq!(unresolved(&s.0, &bt), vec![kb]);
+    }
+
+    fn store_records(s: &Scratch, mac: &Mac) {
+        let dir = adapter_dir(s).join("cache");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(format_mac(mac)), "[ServiceRecords]\n0x00010000=3601\n").unwrap();
+    }
+
+    /// Class of device 0x0580: major class peripheral, pointing device.
+    fn bt_mouse() -> BtDevice {
+        BtDevice {
+            class: 0x0580,
+            ..bt_device([0xA0, 0x78, 0x0A, 0x0A, 0x0B, 0x0C], "Mouse", key(0x70))
+        }
+    }
+
+    /// Only input devices whose records bluetoothd has are paged: the
+    /// speaker is no input device, the mouse still waits for `resolve`.
+    #[test]
+    fn connect_pages_only_input_devices_with_records() {
+        let s = Scratch::new("connectwho");
+        let (kb, sp, ms) = (bt_keyboard().mac, bt_audio().mac, bt_mouse().mac);
+        let (bt, ble) = nvram(&[bt_keyboard(), bt_audio(), bt_mouse()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        store_records(&s, &kb);
+        store_records(&s, &sp);
+        assert_eq!(hid_ready(&s.0, &bt), vec![kb]);
+        let bluez = FakeBluez::default();
+        connect(&s.0, &bt, &bluez).unwrap();
+        assert_eq!(*bluez.log.borrow(), vec![
+            "wait adapter".to_string(),
+            format!("connect {}", format_mac(&kb)),
+        ]);
+        assert!(!bluez.connected(&ADAPTER, &ms));
+    }
+
+    #[test]
+    fn connect_with_no_input_devices_does_nothing() {
+        let s = Scratch::new("connectnone");
+        let (bt, ble) = nvram(&[bt_audio()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let bluez = FakeBluez::default();
+        connect(&s.0, &bt, &bluez).unwrap();
+        assert!(bluez.log.borrow().is_empty());
+    }
+
+    /// A device that connects by itself is not paged again.
+    #[test]
+    fn connect_stops_when_the_device_connects_itself() {
+        let s = Scratch::new("connectself");
+        let kb = bt_keyboard().mac;
+        let (bt, ble) = nvram(&[bt_keyboard()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        store_records(&s, &kb);
+        let bluez = FakeBluez {
+            fail_connect: vec![kb],
+            wake: RefCell::new(vec![kb]),
+            ..Default::default()
+        };
+        connect(&s.0, &bt, &bluez).unwrap();
+        assert_eq!(*bluez.log.borrow(), vec![
+            "wait adapter".to_string(),
+            format!("connect {}", format_mac(&kb)),
+            "pause 2".to_string(),
+        ]);
+    }
+
+    /// A device that stays off is paged for about a minute, then left to
+    /// connect by itself; that is no failure.
+    #[test]
+    fn connect_gives_up_on_a_device_that_stays_off() {
+        let s = Scratch::new("connectoff");
+        let kb = bt_keyboard().mac;
+        let (bt, ble) = nvram(&[bt_keyboard()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        store_records(&s, &kb);
+        let bluez = FakeBluez {
+            fail_connect: vec![kb],
+            ..Default::default()
+        };
+        connect(&s.0, &bt, &bluez).unwrap();
+        let log = bluez.log.borrow();
+        assert_eq!(log.iter().filter(|l| l.starts_with("connect ")).count(), 7);
+        let paused: u64 = log
+            .iter()
+            .filter_map(|l| l.strip_prefix("pause ")?.parse::<u64>().ok())
+            .sum();
+        assert_eq!(paused, 59);
     }
 }

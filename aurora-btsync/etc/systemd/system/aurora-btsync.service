@@ -6,8 +6,8 @@ Documentation=https://github.com/aurora-silicon/aurora-bless/tree/master/aurora-
 # restart that runs once this unit has finished.
 Before=bluetooth.service
 # BR/EDR devices copied from macOS still need bluetoothd to read their SDP
-# records once it runs.
-Wants=aurora-btsync-resolve.service
+# records once it runs, and macOS input devices get connected at boot.
+Wants=aurora-btsync-resolve.service aurora-btsync-connect.service
 ConditionPathExists=/dev/mtd/by-name/nvram
 
 [Service]

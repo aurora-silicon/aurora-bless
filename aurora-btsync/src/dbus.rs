@@ -205,6 +205,17 @@ impl Bluez for SystemBus {
         }
     }
 
+    fn connected(&self, adapter: &Mac, dev: &Mac) -> bool {
+        let (Ok(con), Ok(Some(a))) = (self.con(), self.adapter_path(adapter)) else {
+            return false;
+        };
+        bredr_connected(con, &format!("{}/{}", a, dev_node(dev)))
+    }
+
+    fn pause(&self, d: Duration) {
+        thread::sleep(d);
+    }
+
     fn wait_connected(&self, adapter: &Mac, devs: &[Mac]) -> Result<Mac, String> {
         let con = self.con()?;
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
