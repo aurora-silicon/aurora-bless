@@ -11,7 +11,7 @@ use dbus::{
     arg::{prop_cast, PropMap},
     blocking::{
         stdintf::org_freedesktop_dbus::{
-            ObjectManager, Properties, PropertiesPropertiesChanged,
+            ObjectManager, ObjectManagerInterfacesAdded, Properties, PropertiesPropertiesChanged,
         },
         Connection,
     },
@@ -140,12 +140,48 @@ impl Bluez for SystemBus {
     }
 
     fn wait_adapter(&self, adapter: &Mac) {
-        let start = Instant::now();
-        while start.elapsed() < ADAPTER_TIMEOUT {
-            if matches!(self.adapter(adapter), Ok(Some((_, true)))) {
-                return;
+        let Ok(con) = self.con() else { return };
+        // Set when an adapter appears or one of its properties changes.
+        let changed: Arc<Mutex<bool>> = Arc::default();
+        let sender = "org.bluez".into();
+        let rule = PropertiesPropertiesChanged::match_rule(Some(&sender), None).static_clone();
+        let sink = changed.clone();
+        let props = con.add_match(
+            rule,
+            move |p: PropertiesPropertiesChanged, _: &Connection, _: &Message| {
+                if p.interface_name == "org.bluez.Adapter1" {
+                    *sink.lock().unwrap() = true;
+                }
+                true
+            },
+        );
+        let rule = ObjectManagerInterfacesAdded::match_rule(Some(&sender), None).static_clone();
+        let sink = changed.clone();
+        let added = con.add_match(
+            rule,
+            move |p: ObjectManagerInterfacesAdded, _: &Connection, _: &Message| {
+                if p.interfaces.contains_key("org.bluez.Adapter1") {
+                    *sink.lock().unwrap() = true;
+                }
+                true
+            },
+        );
+        // Checked after the matches are registered, so an adapter powered on
+        // in between is not missed.
+        let deadline = Instant::now() + ADAPTER_TIMEOUT;
+        let mut check = true;
+        loop {
+            if check && matches!(self.adapter(adapter), Ok(Some((_, true)))) {
+                break;
             }
-            thread::sleep(Duration::from_millis(500));
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || con.process(left).is_err() {
+                break;
+            }
+            check = std::mem::take(&mut *changed.lock().unwrap());
+        }
+        for token in [props, added].into_iter().flatten() {
+            let _ = con.remove_match(token);
         }
     }
 
