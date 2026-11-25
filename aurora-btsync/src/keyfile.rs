@@ -67,7 +67,6 @@ impl KeyFile {
         KeyFile { groups }
     }
 
-    #[cfg(test)]
     pub fn get(&self, group: &str, key: &str) -> Option<&str> {
         self.groups
             .iter()
@@ -111,6 +110,10 @@ impl KeyFile {
             .rposition(|l| !l.trim().is_empty())
             .map_or(0, |i| i + 1);
         g.lines.insert(at, line);
+    }
+
+    pub fn has_group(&self, name: &str) -> bool {
+        self.groups.iter().any(|g| g.name.as_deref() == Some(name))
     }
 
     pub fn remove_group(&mut self, name: &str) {

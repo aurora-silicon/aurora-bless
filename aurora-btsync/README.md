@@ -7,12 +7,15 @@ them into BlueZ's storage under `/var/lib/bluetooth`. It replaces
 `asahi-btsync`, which stays available as a symlink, and
 `asahi-btsync.service` is an alias of `aurora-btsync.service`.
 
-    aurora-btsync list   # the devices paired in macOS (no keys printed)
-    aurora-btsync sync   # needs root
+    aurora-btsync list     # the devices paired in macOS (no keys printed)
+    aurora-btsync sync     # needs root
+    aurora-btsync resolve  # needs root and a running bluetoothd
 
 The udev rule starts `aurora-btsync.service` when the NVRAM device appears.
 The unit runs before `bluetooth.service`, so at boot bluetoothd reads the
-keys when it starts and needs no restart.
+keys when it starts and needs no restart. It also starts
+`aurora-btsync-resolve.service`, which runs `aurora-btsync resolve` once
+bluetoothd is up.
 
 ## What sync does
 
@@ -33,6 +36,13 @@ keys when it starts and needs no restart.
   key (tag 0x10), which is also written as `PeripheralLongTermKey`.
 - Tag 0x11 is the device's appearance and goes into `[General]` of a new
   file.
+- A BR/EDR device of major class Peripheral (keyboard, mouse, trackpad,
+  game controller) gets the HID service in `Services` if its file has no
+  `Services`, including files written by older versions. bluetoothd only
+  registers a device as an input device when it lists that service. It
+  answers a HID connection from a device it has not registered with a
+  virtual cable unplug, and the device then deletes its pairing for this
+  controller address, which is the one macOS uses too.
 - When bluetoothd is already running and the storage directory is its own
   (`/var/lib/bluetooth`, not one given with `-c`), it is restarted so it loads the new
   keys, and only the devices that were added or updated are connected. A
@@ -40,6 +50,20 @@ keys when it starts and needs no restart.
   still succeeds.
 
 Files are written atomically with mode 0600.
+
+## What resolve does
+
+NVRAM holds a BR/EDR device's link key but not its SDP records, and BlueZ
+needs them (for an input device, the HID record carries the report
+descriptor). bluetoothd only reads them when it pairs a device itself or
+is asked to connect one. `resolve` lists the BR/EDR devices from NVRAM
+that BlueZ has a pairing for but no records (no `[ServiceRecords]` in
+`/var/lib/bluetooth/<adapter>/cache/<device>`), and calls
+`Device1.Connect` on each: bluetoothd reads and stores the records, then
+connects the device. A device that is off or asleep does not answer; it is
+asked again as soon as it connects by itself (a key press wakes a keyboard,
+which then connects to the last host it used). `resolve` exits when every
+device has its records, so after the first time it exits at once.
 
 ## Changes from asahi-btsync 0.2.6
 
