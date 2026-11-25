@@ -340,8 +340,8 @@ pub trait Bluez {
     /// Returns once bluetoothd has this adapter and it is powered, or
     /// after a while if it is not.
     fn wait_adapter(&self, adapter: &Mac);
-    /// Blocks until one of `devs` connects to the adapter (a connection the
-    /// device or someone else starts) and returns it.
+    /// Returns one of `devs` that is connected to the adapter, or blocks
+    /// until one connects (a connection the device or someone else starts).
     fn wait_connected(&self, adapter: &Mac, devs: &[Mac]) -> Result<Mac, String>;
 }
 
@@ -439,28 +439,30 @@ pub fn unresolved(config: &Path, bt: &BtInfo) -> Vec<Mac> {
         .collect()
 }
 
+/// How often resolve restarts bluetoothd after a failed read before it
+/// gives up for this boot.
+const MAX_RESTARTS: usize = 2;
+
 /// Has bluetoothd read the SDP records of the devices that lack them.
 ///
 /// `Device1.Connect` on a device whose records bluetoothd does not have
 /// makes it read them first, store them, and then connect the device's
-/// profiles. Each device is asked once; a device that is off or asleep
-/// times out, and is asked again the next time it connects by itself (a
-/// key press wakes a keyboard, which then connects to the last host it
-/// used). Returns when every device has its records.
+/// profiles. That is only asked of a device that is connected, so the
+/// records are read over the device's own link: bluetoothd marks a
+/// device's services as resolved after a failed read too (a page to a
+/// device that is off or asleep), and then never reads them again until
+/// it restarts. Devices that are not connected are waited for; a key
+/// press wakes a keyboard, which then connects to the last host it used.
+/// If a read still fails, bluetoothd is restarted so that it reads them
+/// on the next connection. Returns when every device has its records.
 pub fn resolve(config: &Path, bt: &BtInfo, bluez: &dyn Bluez) -> Result<(), String> {
-    let mut pending = unresolved(config, bt);
-    if pending.is_empty() {
+    if unresolved(config, bt).is_empty() {
         return Ok(());
     }
     bluez.wait_adapter(&bt.adapter);
-    for mac in &pending {
-        println!("{}: reading its services", format_mac(mac));
-        if let Err(e) = bluez.connect(&bt.adapter, mac) {
-            println!("{}: not reachable now ({e}); waiting for it to connect", format_mac(mac));
-        }
-    }
+    let mut restarts = 0;
     loop {
-        pending = unresolved(config, bt);
+        let pending = unresolved(config, bt);
         if pending.is_empty() {
             println!("all devices paired in macOS have their services");
             return Ok(());
@@ -469,6 +471,17 @@ pub fn resolve(config: &Path, bt: &BtInfo, bluez: &dyn Bluez) -> Result<(), Stri
         println!("{}: connected; reading its services", format_mac(&mac));
         if let Err(e) = bluez.connect(&bt.adapter, &mac) {
             eprintln!("{}: {e}", format_mac(&mac));
+        }
+        if unresolved(config, bt).contains(&mac) {
+            if restarts == MAX_RESTARTS {
+                return Err(format!(
+                    "{}: bluetoothd could not read its services",
+                    format_mac(&mac)
+                ));
+            }
+            restarts += 1;
+            println!("{}: reading its services failed; restarting bluetoothd", format_mac(&mac));
+            bluez.restart(&bt.adapter, true)?;
         }
     }
 }
@@ -512,9 +525,8 @@ mod tests {
         /// Where a successful connect stores the device's SDP records, as
         /// bluetoothd does (the adapter's storage directory).
         store_records: Option<PathBuf>,
-        /// Devices that do not answer a page until they connect by
-        /// themselves.
-        asleep: RefCell<Vec<Mac>>,
+        /// Devices whose next connect fails (once each).
+        fail_once: RefCell<Vec<Mac>>,
         /// The devices that connect by themselves, in order.
         arrivals: RefCell<Vec<Mac>>,
     }
@@ -529,7 +541,13 @@ mod tests {
         }
         fn connect(&self, _: &Mac, dev: &Mac) -> Result<(), String> {
             self.log.borrow_mut().push(format!("connect {}", format_mac(dev)));
-            if self.fail_connect.contains(dev) || self.asleep.borrow().contains(dev) {
+            let once = {
+                let mut f = self.fail_once.borrow_mut();
+                let hit = f.contains(dev);
+                f.retain(|d| d != dev);
+                hit
+            };
+            if self.fail_connect.contains(dev) || once {
                 return Err("org.bluez.Error.Failed: br-connection-page-timeout".into());
             }
             if let Some(dir) = &self.store_records {
@@ -550,7 +568,6 @@ mod tests {
             while !arrivals.is_empty() {
                 let dev = arrivals.remove(0);
                 if devs.contains(&dev) {
-                    self.asleep.borrow_mut().retain(|d| *d != dev);
                     self.log.borrow_mut().push(format!("arrived {}", format_mac(&dev)));
                     return Ok(dev);
                 }
@@ -903,19 +920,16 @@ Services=00001800-0000-1000-8000-00805f9b34fb;00001812-0000-1000-8000-00805f9b34
         assert!(bluez.log.borrow().is_empty());
     }
 
-    /// The speaker answers and gets its records at once. The keyboard is
-    /// asleep: paging it fails, and its records are read when a key press
-    /// wakes it and it connects.
+    /// Nothing is paged: each device's records are read when it connects.
     #[test]
-    fn resolve_reads_records_now_or_when_the_device_connects() {
+    fn resolve_reads_records_when_the_device_connects() {
         let s = Scratch::new("resolve");
         let (kb, sp) = (bt_keyboard().mac, bt_audio().mac);
         let (bt, ble) = nvram(&[bt_keyboard(), bt_audio()], &[]);
         run(&s, &bt, &ble, &FakeBluez::default());
         let bluez = FakeBluez {
             store_records: Some(adapter_dir(&s)),
-            asleep: RefCell::new(vec![kb]),
-            arrivals: RefCell::new(vec![kb]),
+            arrivals: RefCell::new(vec![sp, kb]),
             ..Default::default()
         };
         resolve(&s.0, &bt, &bluez).unwrap();
@@ -923,7 +937,7 @@ Services=00001800-0000-1000-8000-00805f9b34fb;00001812-0000-1000-8000-00805f9b34
         let (kb, sp) = (format_mac(&kb), format_mac(&sp));
         assert_eq!(*bluez.log.borrow(), vec![
             "wait adapter".to_string(),
-            format!("connect {kb}"),
+            format!("arrived {sp}"),
             format!("connect {sp}"),
             format!("arrived {kb}"),
             format!("connect {kb}"),
@@ -935,20 +949,61 @@ Services=00001800-0000-1000-8000-00805f9b34fb;00001812-0000-1000-8000-00805f9b34
         assert!(bluez.log.borrow().is_empty());
     }
 
-    /// A device that never connects keeps resolve waiting; it only ends
-    /// when bluetoothd does (here: the fake has no more arrivals).
+    /// bluetoothd does not read the records again after a failed read, so
+    /// it is restarted and the device is asked again when it reconnects.
+    #[test]
+    fn a_failed_read_restarts_bluetoothd() {
+        let s = Scratch::new("resolvefail");
+        let kb = bt_keyboard().mac;
+        let (bt, ble) = nvram(&[bt_keyboard()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let bluez = FakeBluez {
+            store_records: Some(adapter_dir(&s)),
+            fail_once: RefCell::new(vec![kb]),
+            arrivals: RefCell::new(vec![kb, kb]),
+            ..Default::default()
+        };
+        resolve(&s.0, &bt, &bluez).unwrap();
+        let k = format_mac(&kb);
+        assert_eq!(*bluez.log.borrow(), vec![
+            "wait adapter".to_string(),
+            format!("arrived {k}"),
+            format!("connect {k}"),
+            "restart wait=true".to_string(),
+            format!("arrived {k}"),
+            format!("connect {k}"),
+        ]);
+    }
+
+    #[test]
+    fn resolve_gives_up_after_repeated_failures() {
+        let s = Scratch::new("resolvegiveup");
+        let kb = bt_keyboard().mac;
+        let (bt, ble) = nvram(&[bt_keyboard()], &[]);
+        run(&s, &bt, &ble, &FakeBluez::default());
+        let bluez = FakeBluez {
+            fail_connect: vec![kb],
+            arrivals: RefCell::new(vec![kb; 5]),
+            ..Default::default()
+        };
+        let e = resolve(&s.0, &bt, &bluez).unwrap_err();
+        assert!(e.contains("could not read its services"), "{e}");
+        let restarts = bluez.log.borrow().iter().filter(|l| l.starts_with("restart")).count();
+        assert_eq!(restarts, MAX_RESTARTS);
+    }
+
+    /// A device that never connects is never paged and keeps resolve
+    /// waiting; it only ends when bluetoothd does (here: the fake has no
+    /// more arrivals).
     #[test]
     fn resolve_keeps_waiting_for_a_device_that_stays_off() {
         let s = Scratch::new("resolveoff");
         let kb = bt_keyboard().mac;
         let (bt, ble) = nvram(&[bt_keyboard()], &[]);
         run(&s, &bt, &ble, &FakeBluez::default());
-        let bluez = FakeBluez {
-            store_records: Some(adapter_dir(&s)),
-            asleep: RefCell::new(vec![kb]),
-            ..Default::default()
-        };
+        let bluez = FakeBluez::default();
         assert!(resolve(&s.0, &bt, &bluez).is_err());
+        assert_eq!(*bluez.log.borrow(), vec!["wait adapter".to_string()]);
         assert_eq!(unresolved(&s.0, &bt), vec![kb]);
     }
 }

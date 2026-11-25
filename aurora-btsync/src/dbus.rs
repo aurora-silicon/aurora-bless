@@ -168,6 +168,21 @@ impl Bluez for SystemBus {
                 },
             )
             .map_err(|e| e.to_string())?;
+        // One that is already connected (registered after the match, so a
+        // connection in between is not missed).
+        if let Ok(Some(a)) = self.adapter_path(adapter) {
+            for dev in devs {
+                let proxy = con.with_proxy(
+                    "org.bluez",
+                    format!("{}/{}", a, dev_node(dev)),
+                    Duration::from_secs(5),
+                );
+                if matches!(proxy.get::<bool>("org.bluez.Device1", "Connected"), Ok(true)) {
+                    let _ = con.remove_match(token);
+                    return Ok(*dev);
+                }
+            }
+        }
         let found = loop {
             let paths: Vec<String> = seen.lock().unwrap().drain(..).collect();
             if !paths.is_empty() {
