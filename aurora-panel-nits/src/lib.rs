@@ -29,8 +29,9 @@ pub const DEVICE: &str = "/dev/mtd/by-name/nvram";
 /// The built-in panel's backlight device.
 pub const BACKLIGHT: &str = "apple-panel-bl";
 
-/// Restored levels are kept at or above this share of the maximum, so a
-/// stored near-zero level can never boot to a dark panel.
+/// A stored zero level is lifted to this share of the maximum, so a zero
+/// NVRAM entry can never boot to an unlit panel. Any non-zero level is kept
+/// verbatim down to 1 nit so dark-room levels survive reboots.
 pub const RESTORE_FLOOR_PERCENT: u32 = 5;
 
 #[derive(Debug)]
@@ -82,8 +83,11 @@ pub fn format_nits(nits: u32) -> Vec<u8> {
 
 /// The level to start the panel at for a stored level and the device maximum.
 pub fn clamp_restore(nits: u32, max: u32) -> u32 {
-    let floor = (max * RESTORE_FLOOR_PERCENT / 100).max(1);
-    nits.clamp(floor.min(max), max)
+    if nits == 0 {
+        let floor = (max * RESTORE_FLOOR_PERCENT / 100).max(1);
+        return floor.min(max);
+    }
+    nits.min(max)
 }
 
 /// The level worth storing, or `None` while the panel is blanked or at zero
@@ -276,7 +280,9 @@ mod tests {
     fn restore_clamps() {
         assert_eq!(clamp_restore(140, 525), 140);
         assert_eq!(clamp_restore(0, 525), 26);
-        assert_eq!(clamp_restore(1, 600), 30);
+        assert_eq!(clamp_restore(1, 600), 1);
+        assert_eq!(clamp_restore(2, 525), 2);
+        assert_eq!(clamp_restore(10, 525), 10);
         assert_eq!(clamp_restore(9000, 525), 525);
         assert_eq!(clamp_restore(0, 10), 1);
         assert_eq!(clamp_restore(5, 0), 0);

@@ -13,8 +13,10 @@ The boot loader lights the panel at the level in the NVRAM variable
   takes over. Until then nothing sets the level, so the panel keeps the
   boot loader's. systemd-backlight's unit for this device runs `restore`
   instead of its own load (which does the same when NVRAM is already
-  readable) and saves nothing. Restored levels are kept at or above 5% of
-  the maximum; without the variable the kernel's level is kept. It then stores the level the user
+  readable) and saves nothing. Any non-zero stored level is restored verbatim
+  (up to the device maximum), while a zero entry is lifted to 5% of the maximum
+  so it cannot boot to an unlit panel; without the variable the kernel's level
+  is kept. It then stores the level the user
   picks. A level is written once it has been stable for 5 s, no sooner than
   60 s after the previous write, and once more when the service stops
   (shutdown). Blanked or zero levels are not stored.
