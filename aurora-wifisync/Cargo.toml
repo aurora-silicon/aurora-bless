@@ -1,12 +1,12 @@
 [package]
-name = "asahi-wifisync"
+name = "aurora-wifisync"
 license = "MIT"
 version = "0.2.4"
 edition = "2021"
 
 description = "A tool to sync Wifi passwords with macos on ARM Macs"
-homepage = "https://github.com/WhatAmISupposedToPutHere/asahi-nvram"
-repository = "https://github.com/WhatAmISupposedToPutHere/asahi-nvram"
+homepage = "https://github.com/aurora-silicon/aurora-bless"
+repository = "https://github.com/aurora-silicon/aurora-bless"
 
 [dependencies]
 rust-ini = "0.21"

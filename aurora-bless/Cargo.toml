@@ -1,11 +1,11 @@
 [package]
-name = "asahi-bless"
+name = "aurora-bless"
 version = "0.4.4-neo.2"
 edition = "2021"
 license = "MIT"
 description = "A tool to select active boot partition on ARM Macs"
-homepage = "https://github.com/aurora-silicon/asahi-bless"
-repository = "https://github.com/aurora-silicon/asahi-bless"
+homepage = "https://github.com/aurora-silicon/aurora-bless"
+repository = "https://github.com/aurora-silicon/aurora-bless"
 
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
