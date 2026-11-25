@@ -1,0 +1,20 @@
+[package]
+name = "aurora-wifisync"
+license = "MIT"
+version = "0.3.0"
+edition = "2021"
+
+description = "Use the Wi-Fi networks saved in macOS on Linux (NetworkManager)"
+homepage = "https://github.com/aurora-silicon/aurora-bless"
+repository = "https://github.com/aurora-silicon/aurora-bless"
+
+[dependencies]
+dbus = "0.9.7"
+
+[dependencies.apple-nvram]
+path = "../apple-nvram"
+version = "0.4"
+
+[dependencies.clap]
+version = "4.5"
+features = ["cargo"]

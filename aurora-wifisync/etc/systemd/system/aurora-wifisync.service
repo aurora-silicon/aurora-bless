@@ -1,0 +1,13 @@
+[Unit]
+Description=Add the Wi-Fi networks saved in macOS to NetworkManager
+Documentation=https://github.com/aurora-silicon/aurora-bless/tree/master/aurora-wifisync
+# Write the profiles before NetworkManager reads them, so the first boot
+# already joins a network macOS knows. When NetworkManager is running the
+# sync asks it to reload.
+Before=NetworkManager.service
+ConditionPathExists=/dev/mtd/by-name/nvram
+ConditionPathIsDirectory=/etc/NetworkManager
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/aurora-wifisync sync
