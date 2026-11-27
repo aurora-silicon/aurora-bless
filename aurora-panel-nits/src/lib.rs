@@ -14,13 +14,13 @@
 
 use std::{
     borrow::Cow,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-use apple_nvram::{nvram_parse, window::WriteWindow, VarType};
+use apple_nvram::{mtd, nvram_parse, window::WriteWindow, VarType};
 
 /// The variable the boot loader reads, in the system partition.
 pub const VARIABLE: &[u8] = b"backlight-nits";
@@ -112,10 +112,15 @@ pub fn read_nits(device: &Path) -> Result<Option<u32>> {
     read_nits_from(&data)
 }
 
+/// Whether the NVRAM device is a read-only Linux MTD partition.
+pub fn is_read_only(device: &Path) -> bool {
+    mtd::is_read_only(device)
+}
+
 /// Store `nits` on the NVRAM device (or a file copy). Returns false, without
 /// writing, when the device already holds that level.
 pub fn store_nits(device: &Path, nits: u32) -> Result<bool> {
-    let mut file = OpenOptions::new().read(true).write(true).open(device)?;
+    let mut file = mtd::open_rw(device)?;
     // Hold the lock (and the boot NOR write window) from the read to the write.
     let _window = WriteWindow::open(&file)?;
     let mut data = Vec::new();

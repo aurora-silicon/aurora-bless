@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #![allow(dead_code)]
-use apple_nvram::{nvram_parse, window::WriteWindow, VarType};
+use apple_nvram::{mtd, nvram_parse, window::WriteWindow, VarType};
 use gpt::{disk::LogicalBlockSize, GptConfig};
 use std::{
     borrow::Cow,
@@ -8,6 +8,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom},
     ops::Deref,
+    path::Path,
 };
 use uuid::Uuid;
 
@@ -342,11 +343,7 @@ pub fn get_boot_volume(device: &str, next: bool) -> Result<BootCandidate> {
 }
 
 pub fn clear_next_boot(device: &str) -> Result<bool> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(device)
-        .map_err(Error::ApplyError)?;
+    let mut file = mtd::open_rw(Path::new(device)).map_err(Error::ApplyError)?;
     let _window = WriteWindow::open(&file).map_err(Error::ApplyError)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).map_err(Error::ApplyError)?;
@@ -378,11 +375,7 @@ pub fn set_boot_volume(device: &str, cand: &BootCandidate, next: bool) -> Result
             .hyphenated()
             .encode_upper(&mut Uuid::encode_buffer())
     );
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(device)
-        .map_err(Error::ApplyError)?;
+    let mut file = mtd::open_rw(Path::new(device)).map_err(Error::ApplyError)?;
     let _window = WriteWindow::open(&file).map_err(Error::ApplyError)?;
     let mut data = Vec::new();
     file.read_to_end(&mut data).map_err(Error::ApplyError)?;
