@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
-use std::{borrow::Cow, fs::OpenOptions, io::Read, process::ExitCode};
+use std::{borrow::Cow, fs::OpenOptions, io::Read, path::Path, process::ExitCode};
 
-use apple_nvram::{nvram_parse, window::WriteWindow, VarType};
+use apple_nvram::{mtd, nvram_parse, window::WriteWindow, VarType};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -63,11 +63,12 @@ fn real_main() -> Result<()> {
     let writing = matches!(matches.subcommand_name(), Some("write") | Some("delete"));
     // Reads open the device read-only, so they work while the boot NOR is
     // read-only and cannot change it.
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(writing)
-        .open(device)
-        .map_err(|e| Error::Open(device.clone(), e))?;
+    let mut file = if writing {
+        mtd::open_rw(Path::new(device))
+    } else {
+        OpenOptions::new().read(true).open(device)
+    }
+    .map_err(|e| Error::Open(device.clone(), e))?;
     // Writers hold the NOR open for writing from before the read until the
     // change is applied; readers never open it.
     let _window = if writing {

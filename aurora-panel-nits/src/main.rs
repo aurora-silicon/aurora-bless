@@ -9,7 +9,8 @@ use std::{
 };
 
 use aurora_panel_nits::{
-    clamp_restore, read_nits, savable, store_nits, Backlight, Limiter, BACKLIGHT, DEVICE,
+    clamp_restore, is_read_only, read_nits, savable, store_nits, Backlight, Limiter, BACKLIGHT,
+    DEVICE,
 };
 use nix::{
     poll::{poll, PollFd, PollFlags, PollTimeout},
@@ -207,6 +208,13 @@ fn watch(args: &Args, bl: &Backlight) -> bool {
     // The panel starts at the stored level before anything is stored, so a
     // level picked before NVRAM was readable never replaces the user's.
     restore_once(args, bl, stored);
+    if is_read_only(&args.device) {
+        println!(
+            "NVRAM {} is read-only: not watching for brightness changes",
+            args.device.display()
+        );
+        return true;
+    }
     let mut limiter = Limiter::new(debounce, interval, stored);
     println!(
         "watching {} (NVRAM level {}, debounce {}s, interval {}s)",

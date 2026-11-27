@@ -64,7 +64,16 @@ fn error_to_string(e: Error) -> String {
         Error::OutOfRange => "Index out of range".to_string(),
         Error::Parse => "Unable to parse current nvram contents".to_string(),
         Error::SectionTooBig => "Ran out of space on nvram".to_string(),
-        Error::ApplyError(e) => format!("Failed to save new nvram contents, try running with sudo? Inner error: {:?}", e),
+        Error::ApplyError(e) => {
+            if e.raw_os_error() == Some(13) {
+                format!(
+                    "Failed to save new nvram contents, try running with sudo? Inner error: {:?}",
+                    e
+                )
+            } else {
+                format!("Failed to save new nvram contents: {}", e)
+            }
+        }
         Error::NvramReadError(e) => format!("Failed to read nvram contents, try running with sudo? Inner error: {:?}", e),
         Error::DiskReadError(e) => format!("Failed to collect boot candidates, try running with sudo? Inner error: {:?}", e),
         Error::VolumeNotFound => "Unable to find specified volume".to_string(),
@@ -231,4 +240,32 @@ fn interactive_main(args: &Args, device: &str) -> Result<()> {
     };
 
     set_boot_volume_by_ref(device, &cands[index], args, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn apply_error_suggests_sudo_only_for_raw_eacces() {
+        let os_eacces = Error::ApplyError(io::Error::from_raw_os_error(13));
+        assert!(error_to_string(os_eacces).contains("try running with sudo?"));
+
+        let ro_mtd = Error::ApplyError(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "NVRAM device /dev/mtd/by-name/nvram is read-only (MTD partition lacks MTD_WRITEABLE)",
+        ));
+        let msg = error_to_string(ro_mtd);
+        assert!(msg.contains("read-only"), "{msg}");
+        assert!(!msg.contains("try running with sudo?"), "{msg}");
+
+        let latched = Error::ApplyError(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the boot NOR refused write access: the QSPI driver latched read-only",
+        ));
+        let msg = error_to_string(latched);
+        assert!(msg.contains("latched read-only"), "{msg}");
+        assert!(!msg.contains("try running with sudo?"), "{msg}");
+    }
 }
